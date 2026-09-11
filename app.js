@@ -696,7 +696,7 @@ function parseIGCText(text, filename) {
                 const dLat = lat - prevCoord[0];
                 const dLon = lon - prevCoord[1];
                 if (Math.hypot(dLat, dLon) > MAX_DEG_JUMP) continue; // Skip teleport jump
-                totalDistKm += haversineKm(prevCoord[0], prevCoord[1], lat, lon);
+                totalDistKm += vincentyDistance(prevCoord[0], prevCoord[1], lat, lon);
             }
 
             const pressAlt = parseInt(line.slice(25, 30), 10) || 0;
@@ -782,16 +782,104 @@ function extractDateFromFilename(name) {
     return match ? match[0].replace(/_/g, '-') : 'Unknown';
 }
 
-function haversineKm(lat1, lon1, lat2, lon2) {
-    const R = 6371.0;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
+/**
+ * Vincenty's Inverse Formula to compute geodesic distance on the WGS-84 ellipsoid.
+ * Adopted directly from the XC Simulator app for millimeter-accurate geodesic distances.
+ * @param {Number|Object} p1 - First point {lat, lng} or lat1
+ * @param {Number|Object} p2 - Second point {lat, lng} or lon1
+ * @param {Number} [lat2] - lat2 (if passing 4 numbers)
+ * @param {Number} [lon2] - lon2 (if passing 4 numbers)
+ * @returns {Number} Geodesic distance in kilometers
+ */
+function vincentyDistance(p1, p2, lat2, lon2) {
+    let lat1_val, lon1_val, lat2_val, lon2_val;
+    if (lat2 !== undefined && lon2 !== undefined) {
+        lat1_val = p1;
+        lon1_val = p2;
+        lat2_val = lat2;
+        lon2_val = lon2;
+    } else {
+        if (!p1 || !p2) return 0;
+        lat1_val = (p1.lat !== undefined ? p1.lat : p1[0]);
+        lon1_val = (p1.lng !== undefined ? p1.lng : (p1.lon !== undefined ? p1.lon : p1[1]));
+        lat2_val = (p2.lat !== undefined ? p2.lat : p2[0]);
+        lon2_val = (p2.lng !== undefined ? p2.lng : (p2.lon !== undefined ? p2.lon : p2[1]));
+    }
+
+    if (lat1_val === lat2_val && lon1_val === lon2_val) return 0;
+
+    const lat1 = lat1_val * Math.PI / 180;
+    const lon1 = lon1_val * Math.PI / 180;
+    const lat2_lat = lat2_val * Math.PI / 180;
+    const lon2_lon = lon2_val * Math.PI / 180;
+
+    const a = 6378137.0;          // WGS-84 semi-major axis (meters)
+    const f = 1 / 298.257223563;  // WGS-84 flattening
+    const b = 6356752.314245;     // WGS-84 semi-minor axis (meters)
+
+    const L = lon2_lon - lon1;
+    const U1 = Math.atan((1 - f) * Math.tan(lat1));
+    const U2 = Math.atan((1 - f) * Math.tan(lat2_lat));
+
+    const sinU1 = Math.sin(U1), cosU1 = Math.cos(U1);
+    const sinU2 = Math.sin(U2), cosU2 = Math.cos(U2);
+
+    let lambda = L;
+    let lambdaP;
+    let iterLimit = 100;
+    let cosSqAlpha = 0;
+    let cos2SigmaM = 0;
+    let sinSigma = 0;
+    let cosSigma = 0;
+    let sigma = 0;
+
+    do {
+        const sinLambda = Math.sin(lambda);
+        const cosLambda = Math.cos(lambda);
+        sinSigma = Math.sqrt((cosU2 * sinLambda) * (cosU2 * sinLambda) +
+                             (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) * (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda));
+        if (sinSigma === 0) return 0; // co-incident points
+
+        cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda;
+        sigma = Math.atan2(sinSigma, cosSigma);
+
+        const sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma;
+        cosSqAlpha = 1 - sinAlpha * sinAlpha;
+        cos2SigmaM = (cosSqAlpha === 0) ? 0 : cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha;
+
+        const C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha));
+        lambdaP = lambda;
+        lambda = L + (1 - C) * f * sinAlpha * (
+            sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM))
+        );
+    } while (Math.abs(lambda - lambdaP) > 1e-12 && --iterLimit > 0);
+
+    if (iterLimit === 0) {
+        // Fallback: Haversine on WGS-84 mean radius
+        const dLat = (lat2_val - lat1_val) * Math.PI / 180;
+        const dLon = (lon2_val - lon1_val) * Math.PI / 180;
+        const a_h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(lat1) * Math.cos(lat2_lat) *
+                    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 6378.137 * 2 * Math.atan2(Math.sqrt(a_h), Math.sqrt(1 - a_h));
+    }
+
+    const uSq = cosSqAlpha * (a * a - b * b) / (b * b);
+    const A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+    const B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+    const deltaSigma = B * sinSigma * (
+        cos2SigmaM + B / 4 * (
+            cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM) -
+            B / 6 * cos2SigmaM * (-3 + 4 * sinSigma * sinSigma) * (-3 + 4 * cos2SigmaM * cos2SigmaM)
+        )
+    );
+
+    const s = b * A * (sigma - deltaSigma);
+    return s / 1000; // in kilometers
 }
+
+// Alias for backward compatibility
+const haversineKm = vincentyDistance;
 
 let colorIndex = 0;
 function generateHarmonicColor() {
