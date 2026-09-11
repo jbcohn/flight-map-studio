@@ -1,0 +1,21 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Generated poster outputs and large rendered map files
+igc_flight_map.png
+bay_area_flights.png
+california_dem_*.png
+bay_area_dem_*.png
+test_igc_map_*.png
+*_poster.png
+*.jpg
+*sample.png
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Backup and temp files
+*.bak
+*.tmp

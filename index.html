@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Flight Map Studio — IGC Flight Track & Topo Map Plotter</title>
+    <link rel="icon" type="image/png" href="logo.png">
+
+    <!-- Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="styles.css?v=1.0.0">
+</head>
+<body>
+    <!-- Mobile Backdrop -->
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+
+    <!-- Mobile Toggle Button -->
+    <button id="btn-sidebar-toggle" class="sidebar-toggle-btn" title="Toggle Sidebar">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
+        </svg>
+    </button>
+
+    <!-- App Container -->
+    <div class="app-container">
+        <!-- Floating Glassmorphic Sidebar -->
+        <aside class="sidebar glass" id="sidebar">
+            <header class="app-header">
+                <div class="logo-area">
+                    <img src="logo.png" class="logo-icon-img" alt="Logo">
+                    <div>
+                        <h1>Flight Map Studio</h1>
+                        <span class="status-badge pulse" id="status-badge">READY</span>
+                    </div>
+                </div>
+                <p class="subtitle">Plot IGC flight tracks on shaded relief & topo maps</p>
+            </header>
+
+            <!-- File Upload & Dropzone -->
+            <section class="control-group">
+                <h3 class="group-title">FLIGHT DATA</h3>
+                <div class="dropzone" id="dropzone">
+                    <input type="file" id="file-input" multiple accept=".igc,.IGC" style="position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;">
+                    <input type="file" id="folder-input" webkitdirectory directory multiple style="position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;">
+                    <div class="dropzone-content">
+                        <svg class="dropzone-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p class="drop-text">Drag & drop <strong>.igc</strong> files</p>
+                        <div class="upload-buttons">
+                            <button type="button" class="btn-secondary btn-sm" id="btn-browse-files">Select Files</button>
+                            <button type="button" class="btn-secondary btn-sm" id="btn-browse-folder">Select Folder</button>
+                            <button type="button" class="btn-secondary btn-sm" id="btn-load-demo" title="Load sample tracks from local Tracks folder">Load Demo</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="load-progress-container" class="progress-bar-container" style="display: none;">
+                    <div class="progress-bar" id="load-progress-bar"></div>
+                    <span class="progress-text" id="load-progress-text">Loading tracks...</span>
+                </div>
+            </section>
+
+            <!-- Test Mode & Sampling Slider -->
+            <section class="control-group">
+                <div class="group-header">
+                    <h3 class="group-title">TEST MODE & SAMPLING</h3>
+                    <span class="badge-accent" id="sample-count-badge">0 / 0</span>
+                </div>
+                <div class="slider-control">
+                    <div class="slider-header">
+                        <span>Sample Size:</span>
+                        <span class="slider-value" id="sample-pct-val">100%</span>
+                    </div>
+                    <input type="range" id="sample-slider" min="5" max="100" step="5" value="100">
+                    <div class="quick-preset-chips">
+                        <button class="chip-btn" data-sample="10">10% (Test)</button>
+                        <button class="chip-btn" data-sample="25">25%</button>
+                        <button class="chip-btn" data-sample="50">50%</button>
+                        <button class="chip-btn active" data-sample="100">100%</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Map & Terrain Basemaps -->
+            <section class="control-group">
+                <h3 class="group-title">BASEMAP & TERRAIN</h3>
+                <div class="basemap-grid">
+                    <button class="basemap-card active" data-layer="western-dem">
+                        <span class="basemap-name">Western US 30m DEM</span>
+                        <span class="basemap-sub">Continuous Shaded Relief</span>
+                    </button>
+                    <button class="basemap-card" data-layer="usgs-relief">
+                        <span class="basemap-name">USGS 3DEP Relief</span>
+                        <span class="basemap-sub">Lidar Shaded Relief</span>
+                    </button>
+                    <button class="basemap-card" data-layer="satellite">
+                        <span class="basemap-name">Satellite</span>
+                        <span class="basemap-sub">Esri World Imagery</span>
+                    </button>
+                    <button class="basemap-card" data-layer="opentopo">
+                        <span class="basemap-name">OpenTopoMap</span>
+                        <span class="basemap-sub">Contour Topo</span>
+                    </button>
+                    <button class="basemap-card" data-layer="dark">
+                        <span class="basemap-name">Dark Canvas</span>
+                        <span class="basemap-sub">Esri Dark Gray Base</span>
+                    </button>
+                </div>
+
+                <!-- Place Names & Boundaries Reference Overlay -->
+                <div class="overlay-card">
+                    <div class="overlay-header">
+                        <label class="custom-checkbox">
+                            <input type="checkbox" id="toggle-labels" checked>
+                            <span class="checkbox-indicator"></span>
+                            <span class="checkbox-text">Place Names & Boundaries</span>
+                        </label>
+                        <span class="slider-value" id="labels-opacity-val">50%</span>
+                    </div>
+                    <div class="slider-control" style="margin-bottom: 0;">
+                        <input type="range" id="labels-opacity-slider" min="0" max="100" step="5" value="50">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Quick Region Viewports -->
+            <section class="control-group">
+                <h3 class="group-title">QUICK REGIONS</h3>
+                <div class="quick-regions-row">
+                    <button class="chip-btn region-btn" data-region="california">California</button>
+                    <button class="chip-btn region-btn" data-region="owens_valley">Owens Valley</button>
+                    <button class="chip-btn region-btn" data-region="tahoe">Tahoe & Basin</button>
+                    <button class="chip-btn region-btn" data-region="utah">Utah / Wasatch</button>
+                    <button class="chip-btn region-btn" data-region="colorado">Colorado Rockies</button>
+                    <button class="chip-btn region-btn" id="btn-zoom-fit">Fit Tracks</button>
+                </div>
+            </section>
+
+            <!-- Track Visual Style Controls -->
+            <section class="control-group">
+                <h3 class="group-title">TRACK STYLING</h3>
+                <div class="style-selector">
+                    <button class="style-btn active" data-style="glow">
+                        <span class="style-dot glow-dot"></span> Glow
+                    </button>
+                    <button class="style-btn" data-style="altitude">
+                        <span class="style-dot alt-dot"></span> Altitude
+                    </button>
+                    <button class="style-btn" data-style="vario">
+                        <span class="style-dot vario-dot"></span> Vario (Climb)
+                    </button>
+                    <button class="style-btn" data-style="distinct">
+                        <span class="style-dot multi-dot"></span> Individual
+                    </button>
+                </div>
+
+                <div class="style-options-grid" id="style-options">
+                    <div class="color-picker-row">
+                        <label for="track-color-picker">Track Color:</label>
+                        <div class="color-picker-wrapper">
+                            <input type="color" id="track-color-picker" value="#DC2626">
+                            <span class="color-hex" id="track-color-hex">#DC2626</span>
+                        </div>
+                    </div>
+
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span>Line Width:</span>
+                            <span class="slider-value" id="line-width-val">1.5px</span>
+                        </div>
+                        <input type="range" id="line-width-slider" min="0.5" max="5" step="0.5" value="1.5">
+                    </div>
+
+                    <div class="slider-control" id="glow-control">
+                        <div class="slider-header">
+                            <span>Glow Radius:</span>
+                            <span class="slider-value" id="glow-radius-val">4px</span>
+                        </div>
+                        <input type="range" id="glow-radius-slider" min="0" max="12" step="1" value="4">
+                    </div>
+
+                    <div class="slider-control">
+                        <div class="slider-header">
+                            <span>Track Opacity:</span>
+                            <span class="slider-value" id="opacity-val">80%</span>
+                        </div>
+                        <input type="range" id="opacity-slider" min="10" max="100" step="5" value="80">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Flight Statistics Panel -->
+            <section class="control-group">
+                <h3 class="group-title">FLIGHT SUMMARY</h3>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <span class="stat-label">Flights</span>
+                        <span class="stat-value" id="stat-flight-count">0</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Total GPS Fixes</span>
+                        <span class="stat-value" id="stat-points-count">0</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Total Distance</span>
+                        <span class="stat-value" id="stat-total-dist">0 km</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Max Altitude</span>
+                        <span class="stat-value" id="stat-max-alt">0 m</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Export Poster Panel -->
+            <section class="control-group">
+                <h3 class="group-title">EXPORT POSTER</h3>
+                <div class="export-panel">
+                    <input type="text" id="export-title-input" class="text-input" value="Western US Flight Tracks" placeholder="Map Title">
+                    <div class="export-options">
+                        <select id="export-res-select" class="select-input">
+                            <option value="1">Standard (Screen)</option>
+                            <option value="2" selected>High Res (2x)</option>
+                            <option value="3">Ultra High Res (3x Print)</option>
+                        </select>
+                        <button type="button" class="btn-primary" id="btn-export-poster">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                            </svg>
+                            Export Image
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Flight List Inspector -->
+            <section class="control-group" style="flex: 1; display: flex; flex-direction: column; min-height: 250px;">
+                <div class="group-header">
+                    <h3 class="group-title">FLIGHT LIST</h3>
+                    <div class="flight-list-actions">
+                        <button type="button" class="btn-text" id="btn-toggle-all">Toggle All</button>
+                        <button type="button" class="btn-text text-danger" id="btn-clear-tracks">Clear</button>
+                    </div>
+                </div>
+                <input type="text" id="flight-search" class="text-input" placeholder="Search by date, filename..." style="margin-bottom: 8px;">
+                <div class="flight-list-scroll" id="flight-list">
+                    <div class="empty-state">No flights loaded yet. Drag & drop IGC files above.</div>
+                </div>
+            </section>
+        </aside>
+
+        <!-- Main Map Container -->
+        <main class="map-viewport">
+            <div id="map"></div>
+
+            <!-- Floating Quick Stats Overlay on Map -->
+            <div class="floating-banner glass" id="map-banner">
+                <div class="banner-title" id="banner-title">Flight Tracks Map</div>
+                <div class="banner-sub" id="banner-sub">0 Flights • 0 km Total Distance</div>
+            </div>
+
+            <!-- Altitude Legend (visible in altitude mode) -->
+            <div class="altitude-legend glass" id="altitude-legend" style="display: none;">
+                <span class="legend-title">Altitude (MSL)</span>
+                <div class="legend-bar"></div>
+                <div class="legend-labels">
+                    <span id="legend-min">0 m</span>
+                    <span id="legend-mid">2000 m</span>
+                    <span id="legend-max">4000 m</span>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- App Logic -->
+    <script src="app.js?v=1.1.0"></script>
+</body>
+</html>
