@@ -1782,54 +1782,80 @@ async function exportMapPoster() {
         ctx.fillStyle = currentBg;
         ctx.fillRect(0, 0, exportW, exportH);
 
-        // 2. Compute visible tile grid at current map container view
-        const z = map.getZoom();
-        const tileSize = 256;
-        const maxTiles = 1 << z;
+        // 2. Determine optimal export zoom level for high/ultra resolution
+        const baseZ = map.getZoom();
+        const maxNativeZoom = BASEMAP_LAYERS[state.activeBasemap]?.layer?.options?.maxZoom || 15;
 
-        // Container corners converted to LatLng
+        let exportZ = baseZ;
+        if (resMultiplier === 2) {
+            exportZ = Math.min(maxNativeZoom, baseZ + 1);
+        } else if (resMultiplier >= 3) {
+            exportZ = Math.min(maxNativeZoom, baseZ + 2);
+        }
+
+        const tileSize = 256;
         const nwLatLng = map.containerPointToLatLng([0, 0]);
         const seLatLng = map.containerPointToLatLng([mapSize.x, mapSize.y]);
         const neLatLng = map.containerPointToLatLng([mapSize.x, 0]);
         const swLatLng = map.containerPointToLatLng([0, mapSize.y]);
 
-        // LatLngs projected to world coordinates at current zoom level
-        const pNW = map.project(nwLatLng, z);
-        const pSE = map.project(seLatLng, z);
-        const pNE = map.project(neLatLng, z);
-        const pSW = map.project(swLatLng, z);
+        let pNW = map.project(nwLatLng, exportZ);
+        let pSE = map.project(seLatLng, exportZ);
+        let pNE = map.project(neLatLng, exportZ);
+        let pSW = map.project(swLatLng, exportZ);
 
-        const minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
-        const maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
-        const minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
-        const maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
+        let minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
+        let maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
+        let minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
+        let maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
 
-        // Expand bounds by 1 tile on every side to guarantee 100% viewport coverage
-        const minX = Math.floor(minPx / tileSize) - 1;
-        const maxX = Math.ceil(maxPx / tileSize) + 1;
-        const minY = Math.max(0, Math.floor(minPy / tileSize) - 1);
-        const maxY = Math.min(maxTiles - 1, Math.ceil(maxPy / tileSize) + 1);
+        let maxTiles = 1 << exportZ;
+        let minX = Math.floor(minPx / tileSize) - 1;
+        let maxX = Math.ceil(maxPx / tileSize) + 1;
+        let minY = Math.max(0, Math.floor(minPy / tileSize) - 1);
+        let maxY = Math.min(maxTiles - 1, Math.ceil(maxPy / tileSize) + 1);
+
+        let totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
+
+        // If exportZ = baseZ + 2 yields too many tiles (> 280), fallback to baseZ + 1
+        if (exportZ > baseZ + 1 && totalTiles > 280) {
+            exportZ = baseZ + 1;
+            maxTiles = 1 << exportZ;
+            pNW = map.project(nwLatLng, exportZ);
+            pSE = map.project(seLatLng, exportZ);
+            pNE = map.project(neLatLng, exportZ);
+            pSW = map.project(swLatLng, exportZ);
+            minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
+            maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
+            minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
+            maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
+            minX = Math.floor(minPx / tileSize) - 1;
+            maxX = Math.ceil(maxPx / tileSize) + 1;
+            minY = Math.max(0, Math.floor(minPy / tileSize) - 1);
+            maxY = Math.min(maxTiles - 1, Math.ceil(maxPy / tileSize) + 1);
+            totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
+        }
+
+        // Scale ratio between projected exportZ pixels and poster canvas pixels
+        const scaleRatio = resMultiplier / Math.pow(2, exportZ - baseZ);
 
         const tileCoordsList = [];
         for (let y = minY; y <= maxY; y++) {
             for (let x = minX; x <= maxX; x++) {
-                // Determine exact screen position of this tile's top-left corner
-                const tileNwLatLng = map.unproject([x * tileSize, y * tileSize], z);
-                const screenPt = map.latLngToContainerPoint(tileNwLatLng);
+                const tileX_proj = x * tileSize;
+                const tileY_proj = y * tileSize;
 
-                // Wrapped X for tile fetching across date line / world edge
+                const drawX = Math.floor((tileX_proj - pNW.x) * scaleRatio);
+                const drawY = Math.floor((tileY_proj - pNW.y) * scaleRatio);
+                const drawW = Math.ceil(tileSize * scaleRatio) + 1;
+                const drawH = Math.ceil(tileSize * scaleRatio) + 1;
+
                 const wrappedX = ((x % maxTiles) + maxTiles) % maxTiles;
-
-                // Screen draw position with 1px overlap to eliminate subpixel seam lines
-                const drawX = Math.floor(screenPt.x * resMultiplier);
-                const drawY = Math.floor(screenPt.y * resMultiplier);
-                const drawW = Math.ceil(tileSize * resMultiplier) + 1;
-                const drawH = Math.ceil(tileSize * resMultiplier) + 1;
 
                 tileCoordsList.push({
                     x,
                     y,
-                    z,
+                    z: exportZ,
                     tileX: wrappedX,
                     drawX,
                     drawY,
@@ -1839,7 +1865,13 @@ async function exportMapPoster() {
             }
         }
 
-        // 3. Render Basemap Tiles
+        // 3. Render Basemap Tiles (High / Ultra resolution)
+        let loadedTiles = 0;
+        const updateProgress = () => {
+            loadedTiles++;
+            exportBtn.innerHTML = `Rendering Map (${loadedTiles}/${tileCoordsList.length})...`;
+        };
+
         if (state.activeBasemap === 'western-dem') {
             await Promise.all(tileCoordsList.map(async (t) => {
                 const tileImgData = await getOrRenderTerrariumTile(t.tileX, t.y, t.z);
@@ -1856,6 +1888,7 @@ async function exportMapPoster() {
                         t.drawH
                     );
                 }
+                updateProgress();
             }));
         } else {
             // Tile-based basemap (USGS 3DEP, Satellite, OpenTopo, Dark Canvas)
@@ -1877,11 +1910,12 @@ async function exportMapPoster() {
                     } catch (e) {
                         console.warn('Basemap tile fetch error:', e);
                     }
+                    updateProgress();
                 }));
             }
         }
 
-        // 4. Render Place Names & Boundaries Reference Overlay (if enabled)
+        // 4. Render Place Names & Boundaries Reference Overlay (High / Ultra resolution)
         if (state.showLabels && state.labelsOpacity > 0 && labelsLayer) {
             ctx.save();
             ctx.globalAlpha = state.labelsOpacity;
@@ -1905,16 +1939,19 @@ async function exportMapPoster() {
             ctx.restore();
         }
 
-        // 5. Draw Flight Tracks (Vector paths scaled to export resolution)
+        // 5. Draw Flight Tracks (Direct floating-point subpixel vector projection at export resolution)
+        exportBtn.innerHTML = 'Rendering Tracks...';
         const visibleTracks = state.activeTracks.filter(t => t.visible);
         visibleTracks.forEach(track => {
             const pts = track.points;
             if (pts.length < 2) return;
 
-            // Project all coordinates to container pixel space
+            // Project all coordinates with floating-point precision directly to poster canvas space
             const screenCoords = pts.map(p => {
-                const pt = map.latLngToContainerPoint([p.lat, p.lon]);
-                return [pt.x * resMultiplier, pt.y * resMultiplier, p.alt, p.time];
+                const ptProj = map.project([p.lat, p.lon], exportZ);
+                const exX = (ptProj.x - pNW.x) * scaleRatio;
+                const exY = (ptProj.y - pNW.y) * scaleRatio;
+                return [exX, exY, p.alt, p.time];
             });
 
             if (state.currentStyle === 'glow') {
@@ -1970,24 +2007,21 @@ async function exportMapPoster() {
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
 
-                const SEG_STEP = 3;
-                for (let i = 0; i < screenCoords.length - 1; i += SEG_STEP) {
-                    const end = Math.min(screenCoords.length - 1, i + SEG_STEP);
+                // Render every single segment (SEG_STEP = 1) for maximum vector fidelity on ultra-high-res output
+                for (let i = 0; i < screenCoords.length - 1; i++) {
                     let segColor;
                     if (state.currentStyle === 'altitude') {
-                        const avgAlt = (screenCoords[i][2] + screenCoords[end][2]) / 2;
+                        const avgAlt = (screenCoords[i][2] + screenCoords[i + 1][2]) / 2;
                         segColor = turboColor(avgAlt / 3800.0);
                     } else {
-                        const dt = Math.max(1, parseTimeSec(screenCoords[end][3]) - parseTimeSec(screenCoords[i][3]));
-                        const dz = screenCoords[end][2] - screenCoords[i][2];
+                        const dt = Math.max(1, parseTimeSec(screenCoords[i + 1][3]) - parseTimeSec(screenCoords[i][3]));
+                        const dz = screenCoords[i + 1][2] - screenCoords[i][2];
                         segColor = (dz / dt) >= 0 ? '#10B981' : '#EF4444';
                     }
                     ctx.strokeStyle = segColor;
                     ctx.beginPath();
                     ctx.moveTo(screenCoords[i][0], screenCoords[i][1]);
-                    for (let j = i + 1; j <= end; j++) {
-                        ctx.lineTo(screenCoords[j][0], screenCoords[j][1]);
-                    }
+                    ctx.lineTo(screenCoords[i + 1][0], screenCoords[i + 1][1]);
                     ctx.stroke();
                 }
                 ctx.restore();
