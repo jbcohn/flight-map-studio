@@ -731,6 +731,9 @@ function parseIGCText(text, filename) {
         durationSec = diff;
     }
 
+    // Calculate official XContest max distance over up to 5 points (XC Simulator algorithm)
+    const xcDistKm = calculateXContest5PointDistance(points);
+
     return {
         id: 'trk_' + Math.random().toString(36).slice(2, 9),
         filename,
@@ -739,7 +742,8 @@ function parseIGCText(text, filename) {
         glider,
         points,
         latlngs,
-        distanceKm: Math.round(totalDistKm * 10) / 10,
+        distanceKm: xcDistKm > 0 ? xcDistKm : (Math.round(totalDistKm * 10) / 10),
+        odometerKm: Math.round(totalDistKm * 10) / 10,
         maxAltM: maxAlt,
         minAltM: (minAlt === Infinity) ? 0 : minAlt,
         durationSec,
@@ -879,6 +883,501 @@ function vincentyDistance(p1, p2, lat2, lon2) {
 
 // Alias for backward compatibility
 const haversineKm = vincentyDistance;
+
+// ============================================================
+// XContest 5-Point Distance Optimization Algorithm
+// (From XC Simulator: DP turnpoint search + triangle analysis + refinement)
+// ============================================================
+
+function rdpSimplify(points, epsilon) {
+    if (!points || points.length <= 2) return points;
+
+    let sumLat = 0;
+    for (let i = 0; i < points.length; i++) {
+        sumLat += points[i].lat;
+    }
+    const avgLat = sumLat / points.length;
+    const cosAvgLat = Math.cos(avgLat * Math.PI / 180);
+
+    function distanceToSegmentFlat(p, p1, p2) {
+        const x = p.lng !== undefined ? p.lng : p.lon;
+        const y = p.lat;
+        const x1 = p1.lng !== undefined ? p1.lng : p1.lon;
+        const y1 = p1.lat;
+        const x2 = p2.lng !== undefined ? p2.lng : p2.lon;
+        const y2 = p2.lat;
+
+        const A = x - x1;
+        const B = y - y1;
+        const C = x2 - x1;
+        const D = y2 - y1;
+
+        const dot = A * C + B * D;
+        const len_sq = C * C + D * D;
+        let param = len_sq !== 0 ? dot / len_sq : -1;
+
+        let xx, yy;
+        if (param < 0) {
+            xx = x1;
+            yy = y1;
+        } else if (param > 1) {
+            xx = x2;
+            yy = y2;
+        } else {
+            xx = x1 + param * C;
+            yy = y1 + param * D;
+        }
+
+        const dLat = (y - yy) * 111.12;
+        const dLng = (x - xx) * 111.12 * cosAvgLat;
+        return Math.sqrt(dLat * dLat + dLng * dLng);
+    }
+
+    function simplify(pts) {
+        if (pts.length <= 2) return pts;
+
+        let maxDist = 0;
+        let index = 0;
+        const end = pts.length - 1;
+
+        for (let i = 1; i < end; i++) {
+            const dist = distanceToSegmentFlat(pts[i], pts[0], pts[end]);
+            if (dist > maxDist) {
+                maxDist = dist;
+                index = i;
+            }
+        }
+
+        if (maxDist > epsilon) {
+            const results1 = simplify(pts.slice(0, index + 1));
+            const results2 = simplify(pts.slice(index));
+            return results1.slice(0, results1.length - 1).concat(results2);
+        } else {
+            return [pts[0], pts[end]];
+        }
+    }
+
+    return simplify(points);
+}
+
+function optimizeTrack(points) {
+    const N = points.length;
+    if (N < 2) return null;
+
+    const dist = Array(N).fill(0).map(() => Array(N).fill(0));
+    for (let i = 0; i < N; i++) {
+        for (let j = i; j < N; j++) {
+            const d = vincentyDistance(points[i], points[j]);
+            dist[i][j] = d;
+            dist[j][i] = d;
+        }
+    }
+
+    let bestScore = 0;
+    let bestType = 'free';
+    let bestIndices = [];
+    let bestLegLengths = [];
+    let bestGap = 0;
+    let bestGapPercent = 0;
+    let bestScoredDist = 0;
+    let bestFreeDist = 0;
+
+    // --- OPTION 1: FREE FLIGHT (up to 3 turnpoints, i.e., up to 4 segments) ---
+    const dp = Array(5).fill(0).map(() => Array(N).fill(0));
+    const parent = Array(5).fill(0).map(() => Array(N).fill(-1));
+
+    for (let i = 0; i < N; i++) {
+        for (let j = 0; j < i; j++) {
+            if (dist[j][i] > dp[1][i]) {
+                dp[1][i] = dist[j][i];
+                parent[1][i] = j;
+            }
+        }
+    }
+
+    for (let k = 2; k <= 4; k++) {
+        for (let i = 0; i < N; i++) {
+            for (let j = 0; j < i; j++) {
+                if (dp[k - 1][j] + dist[j][i] > dp[k][i]) {
+                    dp[k][i] = dp[k - 1][j] + dist[j][i];
+                    parent[k][i] = j;
+                }
+            }
+        }
+    }
+
+    let bestFreeEnd = -1;
+    let bestFreeK = 1;
+    for (let k = 1; k <= 4; k++) {
+        for (let i = 0; i < N; i++) {
+            if (dp[k][i] > bestFreeDist) {
+                bestFreeDist = dp[k][i];
+                bestFreeEnd = i;
+                bestFreeK = k;
+            }
+        }
+    }
+
+    if (bestFreeEnd !== -1) {
+        let curr = bestFreeEnd;
+        let k = bestFreeK;
+        const indices = [];
+        while (curr !== -1) {
+            indices.unshift(curr);
+            curr = parent[k][curr];
+            k--;
+        }
+        bestScore = bestFreeDist * 1.0;
+        bestType = 'free';
+        bestIndices = indices;
+        bestLegLengths = indices.slice(1).map((idx, i) => dist[indices[i]][idx]);
+    }
+
+    // --- OPTION 2: TRIANGLES (Flat / FAI) ---
+    const dpGap = Array(N).fill(null).map(() => Array(N).fill(Infinity));
+    const parent_is = Array(N).fill(null).map(() => Array(N).fill(-1));
+
+    for (let hf = 0; hf < N; hf++) {
+        dpGap[0][hf] = dist[0][hf];
+        parent_is[0][hf] = 0;
+        for (let i1 = 1; i1 < N; i1++) {
+            if (dist[i1][hf] < dpGap[i1 - 1][hf]) {
+                dpGap[i1][hf] = dist[i1][hf];
+                parent_is[i1][hf] = i1;
+            } else {
+                dpGap[i1][hf] = dpGap[i1 - 1][hf];
+                parent_is[i1][hf] = parent_is[i1 - 1][hf];
+            }
+        }
+    }
+
+    const minGap = Array(N).fill(null).map(() => Array(N).fill(null));
+    for (let i1 = 0; i1 < N; i1++) {
+        let minG = dpGap[i1][N - 1];
+        let bestIs = parent_is[i1][N - 1];
+        let bestIf = N - 1;
+        minGap[i1][N - 1] = { val: minG, is: bestIs, if: bestIf };
+
+        for (let i3 = N - 2; i3 > i1; i3--) {
+            if (dpGap[i1][i3] < minG) {
+                minG = dpGap[i1][i3];
+                bestIs = parent_is[i1][i3];
+                bestIf = i3;
+            }
+            minGap[i1][i3] = { val: minG, is: bestIs, if: bestIf };
+        }
+    }
+
+    for (let i1 = 0; i1 < N; i1++) {
+        for (let i2 = i1 + 1; i2 < N; i2++) {
+            for (let i3 = i2 + 1; i3 < N; i3++) {
+                const P = dist[i1][i2] + dist[i2][i3] + dist[i3][i1];
+                const gapData = minGap[i1][i3];
+                if (!gapData) continue;
+                const g = gapData.val;
+
+                if (g <= 0.20 * P) {
+                    const scoredDist = P - g;
+                    const s1 = dist[i1][i2];
+                    const s2 = dist[i2][i3];
+                    const s3 = dist[i3][i1];
+                    const shortestLeg = Math.min(s1, s2, s3);
+
+                    const isFai = shortestLeg >= 0.28 * P;
+                    const isClosed = (g / P) < 0.05;
+
+                    let coeff = 1.0;
+                    let type = 'free_tri';
+
+                    if (isFai && isClosed) {
+                        coeff = 1.60;
+                        type = 'closed_fai';
+                    } else if (isFai && !isClosed) {
+                        coeff = 1.40;
+                        type = 'fai';
+                    } else if (!isFai && isClosed) {
+                        coeff = 1.40;
+                        type = 'closed_free';
+                    } else {
+                        coeff = 1.20;
+                        type = 'free_tri';
+                    }
+
+                    const score = scoredDist * coeff;
+
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestType = type;
+                        bestIndices = [gapData.is, i1, i2, i3, gapData.if];
+                        bestLegLengths = [s1, s2, s3];
+                        bestGap = g;
+                        bestGapPercent = (g / P) * 100;
+                        bestScoredDist = scoredDist;
+                    }
+                }
+            }
+        }
+    }
+
+    return {
+        score: bestScore,
+        distance: bestType === 'free' ? bestFreeDist : bestScoredDist,
+        type: bestType,
+        indices: bestIndices,
+        legLengths: bestLegLengths,
+        gap: bestGap,
+        gapPercent: bestGapPercent
+    };
+}
+
+function refineOptimizedFlight(rawPoints, optResult, mappingToRaw) {
+    const simplifiedIndices = optResult.indices;
+    if (!simplifiedIndices || simplifiedIndices.length < 2) {
+        return optResult;
+    }
+
+    const M = mappingToRaw.length;
+    const W = 4;
+
+    if (optResult.type === 'free') {
+        const K = simplifiedIndices.length;
+        const currIndices = simplifiedIndices.map(idx => mappingToRaw[idx]);
+
+        const minRaw = [];
+        const maxRaw = [];
+        for (let j = 0; j < K; j++) {
+            const idx = simplifiedIndices[j];
+            minRaw.push(mappingToRaw[Math.max(0, idx - W)]);
+            maxRaw.push(mappingToRaw[Math.min(M - 1, idx + W)]);
+        }
+
+        for (let iter = 0; iter < 5; iter++) {
+            for (let j = 0; j < K; j++) {
+                let bestIdx = currIndices[j];
+                let maxDistSum = -1;
+
+                const startRange = minRaw[j];
+                const endRange = maxRaw[j];
+
+                const lowerBound = j > 0 ? currIndices[j - 1] + 1 : startRange;
+                const upperBound = j < K - 1 ? currIndices[j + 1] - 1 : endRange;
+
+                for (let i = Math.max(startRange, lowerBound); i <= Math.min(endRange, upperBound); i++) {
+                    let distSum = 0;
+                    if (j > 0) {
+                        distSum += vincentyDistance(rawPoints[currIndices[j - 1]], rawPoints[i]);
+                    }
+                    if (j < K - 1) {
+                        distSum += vincentyDistance(rawPoints[i], rawPoints[currIndices[j + 1]]);
+                    }
+
+                    if (distSum > maxDistSum) {
+                        maxDistSum = distSum;
+                        bestIdx = i;
+                    }
+                }
+                currIndices[j] = bestIdx;
+            }
+        }
+
+        const refinedLegs = [];
+        let totalDist = 0;
+        for (let j = 0; j < K - 1; j++) {
+            const d = vincentyDistance(rawPoints[currIndices[j]], rawPoints[currIndices[j + 1]]);
+            refinedLegs.push(d);
+            totalDist += d;
+        }
+
+        return {
+            score: totalDist * 1.0,
+            distance: totalDist,
+            type: 'free',
+            indices: currIndices,
+            legLengths: refinedLegs,
+            gap: 0,
+            gapPercent: 0,
+            refinedPoints: currIndices.map(idx => rawPoints[idx])
+        };
+    } else {
+        if (simplifiedIndices.length < 5) return optResult;
+
+        const idx_s = simplifiedIndices[0];
+        const idx_1 = simplifiedIndices[1];
+        const idx_2 = simplifiedIndices[2];
+        const idx_3 = simplifiedIndices[3];
+        const idx_f = simplifiedIndices[4];
+
+        const r_s_min = mappingToRaw[Math.max(0, idx_s - W)];
+        const r_s_max = mappingToRaw[Math.min(M - 1, idx_s + W)];
+
+        const r_1_min = mappingToRaw[Math.max(0, idx_1 - W)];
+        const r_1_max = mappingToRaw[Math.min(M - 1, idx_1 + W)];
+
+        const r_2_min = mappingToRaw[Math.max(0, idx_2 - W)];
+        const r_2_max = mappingToRaw[Math.min(M - 1, idx_2 + W)];
+
+        const r_3_min = mappingToRaw[Math.max(0, idx_3 - W)];
+        const r_3_max = mappingToRaw[Math.min(M - 1, idx_3 + W)];
+
+        const r_f_min = mappingToRaw[Math.max(0, idx_f - W)];
+        const r_f_max = mappingToRaw[Math.min(M - 1, idx_f + W)];
+
+        let curr_s = mappingToRaw[idx_s];
+        let curr_1 = mappingToRaw[idx_1];
+        let curr_2 = mappingToRaw[idx_2];
+        let curr_3 = mappingToRaw[idx_3];
+        let curr_f = mappingToRaw[idx_f];
+
+        const getScoreForCombo = (s, i1, i2, i3, f) => {
+            const d12 = vincentyDistance(rawPoints[i1], rawPoints[i2]);
+            const d23 = vincentyDistance(rawPoints[i2], rawPoints[i3]);
+            const d31 = vincentyDistance(rawPoints[i3], rawPoints[i1]);
+            const P = d12 + d23 + d31;
+            const gap = vincentyDistance(rawPoints[s], rawPoints[f]);
+            const gapPercent = P > 0 ? (gap / P) * 100 : 999.0;
+
+            const scoredDist = P - gap;
+            const shortestLeg = Math.min(d12, d23, d31);
+            const isFai = shortestLeg >= 0.28 * P;
+            const isClosed = gapPercent < 5.0;
+
+            let coeff = 1.0;
+            if (gapPercent <= 20.0) {
+                if (isFai && isClosed) {
+                    coeff = 1.60;
+                } else if (isFai && !isClosed) {
+                    coeff = 1.40;
+                } else if (!isFai && isClosed) {
+                    coeff = 1.40;
+                } else {
+                    coeff = 1.20;
+                }
+            }
+            return {
+                score: scoredDist * coeff,
+                distance: scoredDist,
+                gap: gap,
+                gapPercent: gapPercent,
+                legs: [d12, d23, d31]
+            };
+        };
+
+        for (let iter = 0; iter < 4; iter++) {
+            let best_score = -1;
+            let best_s = curr_s;
+            for (let s = r_s_min; s <= Math.min(r_s_max, curr_1); s++) {
+                const res = getScoreForCombo(s, curr_1, curr_2, curr_3, curr_f);
+                if (res.score > best_score) { best_score = res.score; best_s = s; }
+            }
+            curr_s = best_s;
+
+            best_score = -1;
+            let best_1 = curr_1;
+            for (let i1 = Math.max(r_1_min, curr_s); i1 <= Math.min(r_1_max, curr_2 - 1); i1++) {
+                const res = getScoreForCombo(curr_s, i1, curr_2, curr_3, curr_f);
+                if (res.score > best_score) { best_score = res.score; best_1 = i1; }
+            }
+            curr_1 = best_1;
+
+            best_score = -1;
+            let best_2 = curr_2;
+            for (let i2 = Math.max(r_2_min, curr_1 + 1); i2 <= Math.min(r_2_max, curr_3 - 1); i2++) {
+                const res = getScoreForCombo(curr_s, curr_1, i2, curr_3, curr_f);
+                if (res.score > best_score) { best_score = res.score; best_2 = i2; }
+            }
+            curr_2 = best_2;
+
+            best_score = -1;
+            let best_3 = curr_3;
+            for (let i3 = Math.max(r_3_min, curr_2 + 1); i3 <= Math.min(r_3_max, curr_f); i3++) {
+                const res = getScoreForCombo(curr_s, curr_1, curr_2, i3, curr_f);
+                if (res.score > best_score) { best_score = res.score; best_3 = i3; }
+            }
+            curr_3 = best_3;
+
+            best_score = -1;
+            let best_f = curr_f;
+            for (let f = Math.max(r_f_min, curr_3); f <= r_f_max; f++) {
+                const res = getScoreForCombo(curr_s, curr_1, curr_2, curr_3, f);
+                if (res.score > best_score) { best_score = res.score; best_f = f; }
+            }
+            curr_f = best_f;
+        }
+
+        const finalCombo = getScoreForCombo(curr_s, curr_1, curr_2, curr_3, curr_f);
+        return {
+            score: finalCombo.score,
+            distance: finalCombo.distance,
+            type: optResult.type,
+            indices: [curr_s, curr_1, curr_2, curr_3, curr_f],
+            legLengths: finalCombo.legs,
+            gap: finalCombo.gap,
+            gapPercent: finalCombo.gapPercent,
+            refinedPoints: [curr_s, curr_1, curr_2, curr_3, curr_f].map(idx => rawPoints[idx])
+        };
+    }
+}
+
+function calculateXContest5PointDistance(rawPoints) {
+    if (!rawPoints || rawPoints.length < 2) return 0;
+    if (rawPoints.length < 5) {
+        let d = 0;
+        for (let i = 0; i < rawPoints.length - 1; i++) {
+            d += vincentyDistance(rawPoints[i], rawPoints[i + 1]);
+        }
+        return Math.round(d * 10) / 10;
+    }
+
+    let lo = 0.0001;
+    let hi = 10.0;
+    let simplified = [];
+    for (let iter = 0; iter < 12; iter++) {
+        let mid = (lo + hi) / 2;
+        let testSimp = rdpSimplify(rawPoints, mid);
+        if (testSimp.length > 80) {
+            lo = mid;
+        } else {
+            hi = mid;
+            simplified = testSimp;
+        }
+    }
+    if (simplified.length < 5) {
+        simplified = rdpSimplify(rawPoints, lo);
+        if (simplified.length > 80) {
+            const factor = Math.ceil(simplified.length / 80);
+            simplified = simplified.filter((_, idx) => idx % factor === 0);
+        }
+    }
+
+    const optCoarse = optimizeTrack(simplified);
+    if (!optCoarse || !optCoarse.indices || optCoarse.indices.length < 2) {
+        return 0;
+    }
+
+    let lastIdx = 0;
+    const mappingToRaw = [];
+    for (let pt of simplified) {
+        let minDist = Infinity;
+        let bestIdx = lastIdx;
+        const ptLon = pt.lng !== undefined ? pt.lng : pt.lon;
+        for (let i = lastIdx; i < rawPoints.length; i++) {
+            const rpt = rawPoints[i];
+            const rptLon = rpt.lng !== undefined ? rpt.lng : rpt.lon;
+            const d = Math.abs(rpt.lat - pt.lat) + Math.abs(rptLon - ptLon);
+            if (d < minDist) {
+                minDist = d;
+                bestIdx = i;
+            }
+            if (d === 0) break;
+        }
+        mappingToRaw.push(bestIdx);
+        lastIdx = bestIdx;
+    }
+
+    const refined = refineOptimizedFlight(rawPoints, optCoarse, mappingToRaw);
+    const finalDist = refined && refined.distance ? refined.distance : optCoarse.distance;
+    return Math.round(finalDist * 10) / 10;
+}
 
 let colorIndex = 0;
 function generateHarmonicColor() {
