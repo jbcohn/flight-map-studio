@@ -83,14 +83,6 @@ for (let e = 0; e <= MAX_ELEV_LUT; e++) {
 const demTileCache = new Map();
 const MAX_DEM_CACHE = 300;
 
-// Shared Offscreen Canvas for reading terrarium RGB
-const offCanvas = document.createElement('canvas');
-offCanvas.width = 256;
-offCanvas.height = 256;
-const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
-
-const rawElevBuffer = new Float32Array(256 * 256);
-
 function shadeTerrariumImageData(srcData, z, y) {
     const W = 256, H = 256;
     // Calculate ground cell size at tile center latitude
@@ -99,6 +91,9 @@ function shadeTerrariumImageData(srcData, z, y) {
     const cellsize = (40075016 * Math.cos(lat)) / (256 * (1 << z));
     const invCell2 = 1.0 / (2 * Math.max(1, cellsize));
     const z_factor = 1.35;
+
+    // Allocate local elevation buffer for thread/event safe processing
+    const rawElevBuffer = new Float32Array(65536);
 
     // Pass 1: Decode elevation in meters
     for (let i = 0; i < 65536; i++) {
@@ -170,8 +165,12 @@ L.GridLayer.TerrariumDEM = L.GridLayer.extend({
         img.crossOrigin = 'Anonymous';
         img.onload = () => {
             try {
-                offCtx.drawImage(img, 0, 0);
-                const srcData = offCtx.getImageData(0, 0, 256, 256).data;
+                const c = document.createElement('canvas');
+                c.width = 256;
+                c.height = 256;
+                const cCtx = c.getContext('2d', { willReadFrequently: true });
+                cCtx.drawImage(img, 0, 0);
+                const srcData = cCtx.getImageData(0, 0, 256, 256).data;
                 const shaded = shadeTerrariumImageData(srcData, coords.z, coords.y);
                 ctx.putImageData(shaded, 0, 0);
 
@@ -186,7 +185,7 @@ L.GridLayer.TerrariumDEM = L.GridLayer.extend({
                 done(err, tile);
             }
         };
-        img.onerror = (err) => {
+        img.onerror = () => {
             ctx.fillStyle = '#719BAE';
             ctx.fillRect(0, 0, 256, 256);
             done(null, tile);
@@ -1239,8 +1238,12 @@ async function getOrRenderTerrariumTile(x, y, z) {
     if (!img) return null;
 
     try {
-        offCtx.drawImage(img, 0, 0);
-        const srcData = offCtx.getImageData(0, 0, 256, 256).data;
+        const c = document.createElement('canvas');
+        c.width = 256;
+        c.height = 256;
+        const cCtx = c.getContext('2d', { willReadFrequently: true });
+        cCtx.drawImage(img, 0, 0);
+        const srcData = cCtx.getImageData(0, 0, 256, 256).data;
         const shaded = shadeTerrariumImageData(srcData, z, y);
         if (demTileCache.size >= MAX_DEM_CACHE) {
             const firstKey = demTileCache.keys().next().value;
@@ -1280,25 +1283,59 @@ async function exportMapPoster() {
         ctx.fillStyle = currentBg;
         ctx.fillRect(0, 0, exportW, exportH);
 
-        // 2. Compute visible tile grid at current map view
-        const bounds = map.getPixelBounds();
-        const origin = map.getPixelOrigin();
+        // 2. Compute visible tile grid at current map container view
         const z = map.getZoom();
         const tileSize = 256;
-        const minX = Math.floor(bounds.min.x / tileSize);
-        const maxX = Math.floor(bounds.max.x / tileSize);
-        const minY = Math.floor(bounds.min.y / tileSize);
-        const maxY = Math.floor(bounds.max.y / tileSize);
+        const maxTiles = 1 << z;
+
+        // Container corners converted to LatLng
+        const nwLatLng = map.containerPointToLatLng([0, 0]);
+        const seLatLng = map.containerPointToLatLng([mapSize.x, mapSize.y]);
+        const neLatLng = map.containerPointToLatLng([mapSize.x, 0]);
+        const swLatLng = map.containerPointToLatLng([0, mapSize.y]);
+
+        // LatLngs projected to world coordinates at current zoom level
+        const pNW = map.project(nwLatLng, z);
+        const pSE = map.project(seLatLng, z);
+        const pNE = map.project(neLatLng, z);
+        const pSW = map.project(swLatLng, z);
+
+        const minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
+        const maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
+        const minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
+        const maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
+
+        // Expand bounds by 1 tile on every side to guarantee 100% viewport coverage
+        const minX = Math.floor(minPx / tileSize) - 1;
+        const maxX = Math.ceil(maxPx / tileSize) + 1;
+        const minY = Math.max(0, Math.floor(minPy / tileSize) - 1);
+        const maxY = Math.min(maxTiles - 1, Math.ceil(maxPy / tileSize) + 1);
 
         const tileCoordsList = [];
         for (let y = minY; y <= maxY; y++) {
             for (let x = minX; x <= maxX; x++) {
+                // Determine exact screen position of this tile's top-left corner
+                const tileNwLatLng = map.unproject([x * tileSize, y * tileSize], z);
+                const screenPt = map.latLngToContainerPoint(tileNwLatLng);
+
+                // Wrapped X for tile fetching across date line / world edge
+                const wrappedX = ((x % maxTiles) + maxTiles) % maxTiles;
+
+                // Screen draw position with 1px overlap to eliminate subpixel seam lines
+                const drawX = Math.floor(screenPt.x * resMultiplier);
+                const drawY = Math.floor(screenPt.y * resMultiplier);
+                const drawW = Math.ceil(tileSize * resMultiplier) + 1;
+                const drawH = Math.ceil(tileSize * resMultiplier) + 1;
+
                 tileCoordsList.push({
                     x,
                     y,
                     z,
-                    screenX: x * tileSize - origin.x,
-                    screenY: y * tileSize - origin.y
+                    tileX: wrappedX,
+                    drawX,
+                    drawY,
+                    drawW,
+                    drawH
                 });
             }
         }
@@ -1306,7 +1343,7 @@ async function exportMapPoster() {
         // 3. Render Basemap Tiles
         if (state.activeBasemap === 'western-dem') {
             await Promise.all(tileCoordsList.map(async (t) => {
-                const tileImgData = await getOrRenderTerrariumTile(t.x, t.y, t.z);
+                const tileImgData = await getOrRenderTerrariumTile(t.tileX, t.y, t.z);
                 if (tileImgData) {
                     const tCanvas = document.createElement('canvas');
                     tCanvas.width = 256;
@@ -1314,10 +1351,10 @@ async function exportMapPoster() {
                     tCanvas.getContext('2d').putImageData(tileImgData, 0, 0);
                     ctx.drawImage(
                         tCanvas,
-                        t.screenX * resMultiplier,
-                        t.screenY * resMultiplier,
-                        tileSize * resMultiplier,
-                        tileSize * resMultiplier
+                        t.drawX,
+                        t.drawY,
+                        t.drawW,
+                        t.drawH
                     );
                 }
             }));
@@ -1327,15 +1364,15 @@ async function exportMapPoster() {
             if (layerObj && layerObj.layer && layerObj.layer.getTileUrl) {
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
-                        const url = layerObj.layer.getTileUrl({ x: t.x, y: t.y, z: t.z });
+                        const url = layerObj.layer.getTileUrl({ x: t.tileX, y: t.y, z: t.z });
                         const img = await loadImageAsync(url);
                         if (img) {
                             ctx.drawImage(
                                 img,
-                                t.screenX * resMultiplier,
-                                t.screenY * resMultiplier,
-                                tileSize * resMultiplier,
-                                tileSize * resMultiplier
+                                t.drawX,
+                                t.drawY,
+                                t.drawW,
+                                t.drawH
                             );
                         }
                     } catch (e) {
@@ -1351,15 +1388,15 @@ async function exportMapPoster() {
             ctx.globalAlpha = state.labelsOpacity;
             await Promise.all(tileCoordsList.map(async (t) => {
                 try {
-                    const url = labelsLayer.getTileUrl({ x: t.x, y: t.y, z: t.z });
+                    const url = labelsLayer.getTileUrl({ x: t.tileX, y: t.y, z: t.z });
                     const img = await loadImageAsync(url);
                     if (img) {
                         ctx.drawImage(
                             img,
-                            t.screenX * resMultiplier,
-                            t.screenY * resMultiplier,
-                            tileSize * resMultiplier,
-                            tileSize * resMultiplier
+                            t.drawX,
+                            t.drawY,
+                            t.drawW,
+                            t.drawH
                         );
                     }
                 } catch (e) {
@@ -1536,7 +1573,7 @@ async function loadDemoTracks() {
         'Tracks/2014-07-10-XCS-AAA-01.igc',
         'Tracks/Dunlap%20to%20Los%20Banos%202011-05-30_18-17.igc',
         'Tracks/Josh%20Cohn%20Potato%20Hill%202009-07-18_19-07.igc',
-        'Tracks/joshcohn.2016-11-13.09-49-57.IGC',
+        'Tracks/2012-09-30-XCS-AAA-01.igc',
         'Tracks/joshcohn.2017-05-28.18-04-47.IGC',
         'Tracks/joshcohn.2024-08-31.18-31-11.IGC',
         'Tracks/joshcohn.2025-07-12.18-12-11.IGC'
