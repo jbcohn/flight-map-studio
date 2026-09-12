@@ -237,6 +237,7 @@ const BASEMAP_LAYERS = {
 };
 
 let map = null;
+let roadsLayer = null;
 let labelsLayer = null;
 let tracksLayerGroup = null;
 
@@ -262,12 +263,20 @@ function initMap() {
     // Add Zoom Control at top-right
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // Reference Labels Pane (zIndex 350: sits above basemap at 200, below vector tracks at 400)
+    // Reference Labels & Roads Pane (zIndex 350: sits above basemap at 200, below vector tracks at 400)
     map.createPane('labelsPane');
     map.getPane('labelsPane').style.zIndex = 350;
     map.getPane('labelsPane').style.pointerEvents = 'none';
 
-    // Place Names & Boundaries Reference Layer
+    // Roads & Highways Reference Layer (Esri World Transportation)
+    roadsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Roads &copy; Esri',
+        pane: 'labelsPane',
+        maxZoom: 18,
+        opacity: state.labelsOpacity
+    }).addTo(map);
+
+    // Place Names & Boundaries Reference Layer (Esri World Boundaries and Places)
     labelsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
         attribution: 'Reference &copy; Esri',
         pane: 'labelsPane',
@@ -318,7 +327,7 @@ function initUIEventListeners() {
         });
     });
 
-    // Place Names & Boundaries Reference Overlay Controls
+    // Roads & Place Names Reference Overlay Controls
     const toggleLabels = document.getElementById('toggle-labels');
     const labelsSlider = document.getElementById('labels-opacity-slider');
     const labelsVal = document.getElementById('labels-opacity-val');
@@ -326,9 +335,9 @@ function initUIEventListeners() {
     if (toggleLabels) {
         toggleLabels.addEventListener('change', (e) => {
             state.showLabels = e.target.checked;
-            if (labelsLayer) {
-                labelsLayer.setOpacity(state.showLabels ? state.labelsOpacity : 0);
-            }
+            const op = state.showLabels ? state.labelsOpacity : 0;
+            if (roadsLayer) roadsLayer.setOpacity(op);
+            if (labelsLayer) labelsLayer.setOpacity(op);
         });
     }
 
@@ -339,8 +348,9 @@ function initUIEventListeners() {
             if (labelsVal) {
                 labelsVal.textContent = `${val}%`;
             }
-            if (state.showLabels && labelsLayer) {
-                labelsLayer.setOpacity(state.labelsOpacity);
+            if (state.showLabels) {
+                if (roadsLayer) roadsLayer.setOpacity(state.labelsOpacity);
+                if (labelsLayer) labelsLayer.setOpacity(state.labelsOpacity);
             }
         });
     }
@@ -1756,6 +1766,29 @@ async function getOrRenderTerrariumTile(x, y, z) {
     }
 }
 
+// Helper: Construct exact tile URL for any layer at arbitrary zoom z (avoiding Leaflet screen-zoom override)
+function getLayerTileUrl(layer, x, y, z) {
+    if (!layer) return null;
+    const urlTemplate = layer._url;
+    if (urlTemplate) {
+        let sub = 'a';
+        if (layer.options && layer.options.subdomains && layer.options.subdomains.length > 0) {
+            const subs = layer.options.subdomains;
+            sub = subs[Math.abs(x + y) % subs.length];
+        }
+        return urlTemplate
+            .replace('{s}', sub)
+            .replace('{z}', z)
+            .replace('{x}', x)
+            .replace('{y}', y)
+            .replace('{r}', '');
+    }
+    if (typeof layer.getTileUrl === 'function') {
+        return layer.getTileUrl({ x, y, z });
+    }
+    return null;
+}
+
 async function exportMapPoster() {
     const title = document.getElementById('export-title-input').value || 'Western US Flight Tracks';
     const resMultiplier = parseInt(document.getElementById('export-res-select').value, 10) || 1;
@@ -1893,19 +1926,21 @@ async function exportMapPoster() {
         } else {
             // Tile-based basemap (USGS 3DEP, Satellite, OpenTopo, Dark Canvas)
             const layerObj = BASEMAP_LAYERS[state.activeBasemap];
-            if (layerObj && layerObj.layer && layerObj.layer.getTileUrl) {
+            if (layerObj && layerObj.layer) {
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
-                        const url = layerObj.layer.getTileUrl({ x: t.tileX, y: t.y, z: t.z });
-                        const img = await loadImageAsync(url);
-                        if (img) {
-                            ctx.drawImage(
-                                img,
-                                t.drawX,
-                                t.drawY,
-                                t.drawW,
-                                t.drawH
-                            );
+                        const url = getLayerTileUrl(layerObj.layer, t.tileX, t.y, t.z);
+                        if (url) {
+                            const img = await loadImageAsync(url);
+                            if (img) {
+                                ctx.drawImage(
+                                    img,
+                                    t.drawX,
+                                    t.drawY,
+                                    t.drawW,
+                                    t.drawH
+                                );
+                            }
                         }
                     } catch (e) {
                         console.warn('Basemap tile fetch error:', e);
@@ -1915,27 +1950,56 @@ async function exportMapPoster() {
             }
         }
 
-        // 4. Render Place Names & Boundaries Reference Overlay (High / Ultra resolution)
-        if (state.showLabels && state.labelsOpacity > 0 && labelsLayer) {
+        // 4. Render Roads & Place Names Reference Overlays (High / Ultra resolution)
+        if (state.showLabels && state.labelsOpacity > 0) {
             ctx.save();
             ctx.globalAlpha = state.labelsOpacity;
-            await Promise.all(tileCoordsList.map(async (t) => {
-                try {
-                    const url = labelsLayer.getTileUrl({ x: t.tileX, y: t.y, z: t.z });
-                    const img = await loadImageAsync(url);
-                    if (img) {
-                        ctx.drawImage(
-                            img,
-                            t.drawX,
-                            t.drawY,
-                            t.drawW,
-                            t.drawH
-                        );
+
+            // Step 4a: Render Roads & Highways (Esri World Transportation)
+            if (roadsLayer) {
+                await Promise.all(tileCoordsList.map(async (t) => {
+                    try {
+                        const url = getLayerTileUrl(roadsLayer, t.tileX, t.y, t.z);
+                        if (url) {
+                            const img = await loadImageAsync(url);
+                            if (img) {
+                                ctx.drawImage(
+                                    img,
+                                    t.drawX,
+                                    t.drawY,
+                                    t.drawW,
+                                    t.drawH
+                                );
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore missing road tiles
                     }
-                } catch (e) {
-                    // Ignore missing label tiles
-                }
-            }));
+                }));
+            }
+
+            // Step 4b: Render Place Names & Boundaries (Esri World Boundaries and Places) on top of roads
+            if (labelsLayer) {
+                await Promise.all(tileCoordsList.map(async (t) => {
+                    try {
+                        const url = getLayerTileUrl(labelsLayer, t.tileX, t.y, t.z);
+                        if (url) {
+                            const img = await loadImageAsync(url);
+                            if (img) {
+                                ctx.drawImage(
+                                    img,
+                                    t.drawX,
+                                    t.drawY,
+                                    t.drawW,
+                                    t.drawH
+                                );
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore missing label tiles
+                    }
+                }));
+            }
             ctx.restore();
         }
 
