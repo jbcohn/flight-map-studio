@@ -226,19 +226,55 @@
                 <h3 class="group-title">EXPORT POSTER</h3>
                 <div class="export-panel">
                     <input type="text" id="export-title-input" class="text-input" value="Western US Flight Tracks" placeholder="Map Title">
-                    <div class="export-options">
-                        <select id="export-res-select" class="select-input">
-                            <option value="1">Standard (Screen)</option>
-                            <option value="2" selected>High Res (2x)</option>
-                            <option value="3">Ultra High Res (3x Print)</option>
+                    
+                    <div class="export-row">
+                        <label class="control-label" for="export-size-select">Poster Size</label>
+                        <select id="export-size-select" class="select-input">
+                            <option value="24x36" selected>24" × 36" (Large Wall Poster)</option>
+                            <option value="18x24">18" × 24" (Standard Frame)</option>
+                            <option value="20x30">20" × 30" (Photo Poster)</option>
+                            <option value="12x18">12" × 18" (Small Print)</option>
+                            <option value="a1">A1 (594 × 841 mm)</option>
+                            <option value="a2">A2 (420 × 594 mm)</option>
+                            <option value="viewport">Current Viewport (Custom)</option>
                         </select>
-                        <button type="button" class="btn-primary" id="btn-export-poster">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-                            </svg>
-                            Export Image
-                        </button>
                     </div>
+
+                    <div class="export-row-split">
+                        <div class="export-field">
+                            <label class="control-label">Orientation</label>
+                            <div class="segmented-control" id="export-orient-group">
+                                <button type="button" class="segment-btn active" data-orient="landscape">Landscape</button>
+                                <button type="button" class="segment-btn" data-orient="portrait">Portrait</button>
+                            </div>
+                        </div>
+                        <div class="export-field">
+                            <label class="control-label" for="export-dpi-select">Print Quality</label>
+                            <select id="export-dpi-select" class="select-input">
+                                <option value="300" selected>300 DPI (Fine Print)</option>
+                                <option value="150">150 DPI (Fast / Draft)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="export-meta-info" id="export-dimensions-info">
+                        10,800 × 7,200 px • 36.0" × 24.0" @ 300 DPI
+                    </div>
+
+                    <div class="export-checkbox-row">
+                        <label class="custom-checkbox">
+                            <input type="checkbox" id="toggle-crop-frame" checked>
+                            <span class="checkbox-indicator"></span>
+                            <span class="checkbox-text">Show Poster Frame on Map</span>
+                        </label>
+                    </div>
+
+                    <button type="button" class="btn-primary" id="btn-export-poster" style="width: 100%; justify-content: center;">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                        </svg>
+                        Export Poster PNG
+                    </button>
                 </div>
             </section>
 
@@ -261,6 +297,17 @@
         <!-- Main Map Container -->
         <main class="map-viewport">
             <div id="map"></div>
+
+            <!-- Interactive Poster Crop Frame Overlay -->
+            <div id="poster-frame-overlay" class="poster-frame-overlay">
+                <div id="poster-frame-box" class="poster-frame-box">
+                    <div class="poster-crop-mark tl"></div>
+                    <div class="poster-crop-mark tr"></div>
+                    <div class="poster-crop-mark bl"></div>
+                    <div class="poster-crop-mark br"></div>
+                    <span class="poster-frame-badge" id="poster-frame-badge">36" × 24" Landscape</span>
+                </div>
+            </div>
 
             <!-- Floating Quick Stats Overlay on Map -->
             <div class="floating-banner glass" id="map-banner">
@@ -285,6 +332,6 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
     <!-- App Logic -->
-    <script src="app.js?v=1.3.0"></script>
+    <script src="app.js?v=1.4.0"></script>
 </body>
 </html>

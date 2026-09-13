@@ -20,6 +20,21 @@ const state = {
     showLabels: true,       // Place names & boundaries overlay
     labelsOpacity: 0.5,     // 0.0 to 1.0
     selectedTrackId: null,
+    exportSize: '24x36',    // '24x36' | '18x24' | '20x30' | '12x18' | 'a1' | 'a2' | 'viewport'
+    exportOrientation: 'landscape', // 'landscape' | 'portrait'
+    exportDpi: 300,         // 300 (fine print) | 150 (draft/large format)
+    showCropFrame: true,    // Show visual poster frame overlay on map
+};
+
+// Standard Physical Poster Print Sizes
+const POSTER_SIZES = {
+    '24x36': { name: '24" × 36"', short: '24x36', wIn: 36, hIn: 24, ratio: 36 / 24, label: 'Large Wall Poster' },
+    '18x24': { name: '18" × 24"', short: '18x24', wIn: 24, hIn: 18, ratio: 24 / 18, label: 'Standard Frame' },
+    '20x30': { name: '20" × 30"', short: '20x30', wIn: 30, hIn: 20, ratio: 30 / 20, label: 'Photo Poster' },
+    '12x18': { name: '12" × 18"', short: '12x18', wIn: 18, hIn: 12, ratio: 18 / 12, label: 'Small Print' },
+    'a1':    { name: 'A1 (594 × 841 mm)', short: 'A1', wIn: 33.11, hIn: 23.39, ratio: 33.11 / 23.39, label: 'ISO A1' },
+    'a2':    { name: 'A2 (420 × 594 mm)', short: 'A2', wIn: 23.39, hIn: 16.54, ratio: 23.39 / 16.54, label: 'ISO A2' },
+    'viewport': { name: 'Screen Viewport', short: 'Custom', isViewport: true, label: 'Current View' }
 };
 
 // Region Presets (Center Lat, Lon, Zoom)
@@ -250,6 +265,8 @@ document.addEventListener('DOMContentLoaded', () => {
     initUIEventListeners();
     initDropzone();
     updateStatsSummary();
+    updateExportMetaInfo();
+    updatePosterFrame();
 });
 
 function initMap() {
@@ -289,6 +306,9 @@ function initMap() {
 
     // Set initial native DEM basemap
     setBasemap(state.activeBasemap);
+
+    // Update poster crop frame on map pan, zoom, and container resize
+    map.on('move moveend resize zoomend', updatePosterFrame);
 }
 
 function setBasemap(layerKey) {
@@ -508,8 +528,51 @@ function initUIEventListeners() {
         }
     });
 
-    // Export Poster
-    document.getElementById('btn-export-poster').addEventListener('click', exportMapPoster);
+    // Export Poster UI Controls
+    const sizeSelect = document.getElementById('export-size-select');
+    if (sizeSelect) {
+        sizeSelect.addEventListener('change', (e) => {
+            state.exportSize = e.target.value;
+            updateExportMetaInfo();
+            updatePosterFrame();
+        });
+    }
+
+    const dpiSelect = document.getElementById('export-dpi-select');
+    if (dpiSelect) {
+        dpiSelect.addEventListener('change', (e) => {
+            state.exportDpi = parseInt(e.target.value, 10) || 300;
+            updateExportMetaInfo();
+            updatePosterFrame();
+        });
+    }
+
+    const orientGroup = document.getElementById('export-orient-group');
+    if (orientGroup) {
+        orientGroup.querySelectorAll('.segment-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                orientGroup.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                state.exportOrientation = btn.getAttribute('data-orient');
+                updateExportMetaInfo();
+                updatePosterFrame();
+            });
+        });
+    }
+
+    const cropToggle = document.getElementById('toggle-crop-frame');
+    if (cropToggle) {
+        cropToggle.addEventListener('change', (e) => {
+            state.showCropFrame = e.target.checked;
+            updatePosterFrame();
+        });
+    }
+
+    // Export Poster Button
+    const exportBtn = document.getElementById('btn-export-poster');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', exportMapPoster);
+    }
 
     // Mobile Sidebar Toggle
     const sidebar = document.getElementById('sidebar');
@@ -1789,9 +1852,224 @@ function getLayerTileUrl(layer, x, y, z) {
     return null;
 }
 
+// ============================================================
+// Poster Sizing, Framing & High-Resolution Export
+// ============================================================
+
+// Precomputed CRC32 Table for PNG chunk checksums
+const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        table[i] = c;
+    }
+    return table;
+})();
+
+function computeCrc32(buf, start, len) {
+    let crc = 0xFFFFFFFF;
+    for (let i = start; i < start + len; i++) {
+        crc = CRC32_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Embeds standard PNG pHYs chunk so image viewers (e.g. macOS Preview, Photoshop) recognize exact physical inches and print DPI
+function embedPngDpi(blob, dpi) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const buffer = reader.result;
+                const view = new DataView(buffer);
+                const bytes = new Uint8Array(buffer);
+
+                // Check PNG signature: 89 50 4E 47 0D 0A 1A 0A
+                if (view.getUint32(0) !== 0x89504E47 || view.getUint32(4) !== 0x0D0A1A0A) {
+                    return resolve(blob);
+                }
+
+                // IHDR chunk ends at byte offset 33 (8 bytes sig + 25 bytes IHDR chunk)
+                const ihdrEnd = 33;
+                const ppm = Math.round(dpi / 0.0254); // Pixels per meter
+
+                // 21-byte pHYs chunk:
+                // 4 bytes: length (9)
+                // 4 bytes: chunk type ('pHYs')
+                // 4 bytes: X pixels per unit
+                // 4 bytes: Y pixels per unit
+                // 1 byte:  unit specifier (1 = meter)
+                // 4 bytes: CRC32
+                const physChunk = new Uint8Array(21);
+                const pView = new DataView(physChunk.buffer);
+                pView.setUint32(0, 9);
+                physChunk[4] = 0x70; // 'p'
+                physChunk[5] = 0x48; // 'H'
+                physChunk[6] = 0x59; // 'Y'
+                physChunk[7] = 0x73; // 's'
+                pView.setUint32(8, ppm);
+                pView.setUint32(12, ppm);
+                physChunk[16] = 1; // 1 = meter
+
+                const crc = computeCrc32(physChunk, 4, 13);
+                pView.setUint32(17, crc);
+
+                const newBytes = new Uint8Array(bytes.length + 21);
+                newBytes.set(bytes.subarray(0, ihdrEnd), 0);
+                newBytes.set(physChunk, ihdrEnd);
+                newBytes.set(bytes.subarray(ihdrEnd), ihdrEnd + 21);
+
+                resolve(new Blob([newBytes.buffer], { type: 'image/png' }));
+            } catch (err) {
+                console.warn('Could not inject PNG pHYs metadata:', err);
+                resolve(blob);
+            }
+        };
+        reader.onerror = () => resolve(blob);
+        reader.readAsArrayBuffer(blob);
+    });
+}
+
+function getPosterConfig() {
+    const sizeKey = document.getElementById('export-size-select')?.value || state.exportSize || '24x36';
+    const orient = state.exportOrientation || 'landscape';
+    const dpi = parseInt(document.getElementById('export-dpi-select')?.value, 10) || state.exportDpi || 300;
+    const preset = POSTER_SIZES[sizeKey] || POSTER_SIZES['24x36'];
+
+    let wIn, hIn;
+    if (preset.isViewport) {
+        const mapSize = map ? map.getSize() : { x: 1200, y: 900 };
+        const baseW = mapSize.x / 96;
+        const baseH = mapSize.y / 96;
+        if (orient === 'landscape') {
+            wIn = Math.max(baseW, baseH);
+            hIn = Math.min(baseW, baseH);
+        } else {
+            wIn = Math.min(baseW, baseH);
+            hIn = Math.max(baseW, baseH);
+        }
+        // Scale so long edge is at least 18 inches for a standard poster
+        const longEdge = Math.max(wIn, hIn);
+        if (longEdge < 18) {
+            const factor = 18 / longEdge;
+            wIn *= factor;
+            hIn *= factor;
+        }
+    } else {
+        if (orient === 'landscape') {
+            wIn = Math.max(preset.wIn, preset.hIn);
+            hIn = Math.min(preset.wIn, preset.hIn);
+        } else {
+            wIn = Math.min(preset.wIn, preset.hIn);
+            hIn = Math.max(preset.wIn, preset.hIn);
+        }
+    }
+
+    const widthPx = Math.round(wIn * dpi);
+    const heightPx = Math.round(hIn * dpi);
+
+    return {
+        sizeKey,
+        preset,
+        orient,
+        dpi,
+        wIn: parseFloat(wIn.toFixed(2)),
+        hIn: parseFloat(hIn.toFixed(2)),
+        widthPx,
+        heightPx,
+        ratio: wIn / hIn
+    };
+}
+
+function getPosterScreenFrame() {
+    if (!map) return null;
+    const mapSize = map.getSize();
+    const config = getPosterConfig();
+    const targetRatio = config.ratio; // W / H
+
+    // Fit frame inside 92% of visible screen viewport
+    const margin = 0.92;
+    const maxW = mapSize.x * margin;
+    const maxH = mapSize.y * margin;
+
+    let frameW, frameH;
+    if (maxW / maxH > targetRatio) {
+        frameH = maxH;
+        frameW = maxH * targetRatio;
+    } else {
+        frameW = maxW;
+        frameH = maxW / targetRatio;
+    }
+
+    const frameX = (mapSize.x - frameW) / 2;
+    const frameY = (mapSize.y - frameH) / 2;
+
+    const nwPt = L.point(frameX, frameY);
+    const sePt = L.point(frameX + frameW, frameY + frameH);
+    const nePt = L.point(frameX + frameW, frameY);
+    const swPt = L.point(frameX, frameY + frameH);
+
+    return {
+        screen: { x: frameX, y: frameY, w: frameW, h: frameH },
+        points: { nwPt, sePt, nePt, swPt },
+        geo: {
+            nwLatLng: map.containerPointToLatLng(nwPt),
+            seLatLng: map.containerPointToLatLng(sePt),
+            neLatLng: map.containerPointToLatLng(nePt),
+            swLatLng: map.containerPointToLatLng(swPt),
+        },
+        config
+    };
+}
+
+function updateExportMetaInfo() {
+    const infoEl = document.getElementById('export-dimensions-info');
+    if (!infoEl) return;
+    const config = getPosterConfig();
+    const wFmt = config.widthPx.toLocaleString();
+    const hFmt = config.heightPx.toLocaleString();
+    infoEl.textContent = `${wFmt} × ${hFmt} px • ${config.wIn}" × ${config.hIn}" @ ${config.dpi} DPI`;
+}
+
+function updatePosterFrame() {
+    const overlay = document.getElementById('poster-frame-overlay');
+    const box = document.getElementById('poster-frame-box');
+    const badge = document.getElementById('poster-frame-badge');
+    if (!overlay || !box || !map) return;
+
+    if (!state.showCropFrame) {
+        overlay.classList.add('hidden');
+        return;
+    }
+    overlay.classList.remove('hidden');
+
+    const frameData = getPosterScreenFrame();
+    if (!frameData) return;
+
+    const { x, y, w, h } = frameData.screen;
+    box.style.left = `${Math.round(x)}px`;
+    box.style.top = `${Math.round(y)}px`;
+    box.style.width = `${Math.round(w)}px`;
+    box.style.height = `${Math.round(h)}px`;
+
+    if (badge) {
+        const config = frameData.config;
+        const orientLabel = config.orient.charAt(0).toUpperCase() + config.orient.slice(1);
+        badge.textContent = `${config.wIn}" × ${config.hIn}" ${orientLabel} (${config.widthPx.toLocaleString()} × ${config.heightPx.toLocaleString()} px)`;
+    }
+}
+
 async function exportMapPoster() {
     const title = document.getElementById('export-title-input').value || 'Western US Flight Tracks';
-    const resMultiplier = parseInt(document.getElementById('export-res-select').value, 10) || 1;
+    const config = getPosterConfig();
+    const frameData = getPosterScreenFrame();
+    if (!frameData) {
+        alert('Map frame could not be determined.');
+        return;
+    }
 
     const exportBtn = document.getElementById('btn-export-poster');
     const origHTML = exportBtn.innerHTML;
@@ -1799,9 +2077,8 @@ async function exportMapPoster() {
     exportBtn.innerHTML = 'Rendering Poster...';
 
     try {
-        const mapSize = map.getSize();
-        const exportW = mapSize.x * resMultiplier;
-        const exportH = mapSize.y * resMultiplier;
+        const exportW = config.widthPx;
+        const exportH = config.heightPx;
 
         const poster = document.createElement('canvas');
         poster.width = exportW;
@@ -1810,37 +2087,31 @@ async function exportMapPoster() {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
 
-        // 1. Fill base background (slate ocean or dark base)
+        // 1. Fill base background
         const currentBg = BASEMAP_LAYERS[state.activeBasemap]?.bgColor || '#111827';
         ctx.fillStyle = currentBg;
         ctx.fillRect(0, 0, exportW, exportH);
 
-        // 2. Determine optimal export zoom level for high/ultra resolution
+        // 2. Determine optimal export tile zoom level
         const baseZ = map.getZoom();
         const maxNativeZoom = BASEMAP_LAYERS[state.activeBasemap]?.layer?.options?.maxZoom || 15;
-
-        let exportZ = baseZ;
-        if (resMultiplier === 2) {
-            exportZ = Math.min(maxNativeZoom, baseZ + 1);
-        } else if (resMultiplier >= 3) {
-            exportZ = Math.min(maxNativeZoom, baseZ + 2);
-        }
+        
+        // Target resolution ratio vs on-screen frame
+        const scaleRatioTarget = exportW / frameData.screen.w;
+        let idealZ = Math.round(baseZ + Math.log2(scaleRatioTarget));
+        let exportZ = Math.min(maxNativeZoom, Math.max(baseZ, idealZ));
 
         const tileSize = 256;
-        const nwLatLng = map.containerPointToLatLng([0, 0]);
-        const seLatLng = map.containerPointToLatLng([mapSize.x, mapSize.y]);
-        const neLatLng = map.containerPointToLatLng([mapSize.x, 0]);
-        const swLatLng = map.containerPointToLatLng([0, mapSize.y]);
+        const nwLatLng = frameData.geo.nwLatLng;
+        const seLatLng = frameData.geo.seLatLng;
 
         let pNW = map.project(nwLatLng, exportZ);
         let pSE = map.project(seLatLng, exportZ);
-        let pNE = map.project(neLatLng, exportZ);
-        let pSW = map.project(swLatLng, exportZ);
 
-        let minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
-        let maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
-        let minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
-        let maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
+        let minPx = Math.min(pNW.x, pSE.x);
+        let maxPx = Math.max(pNW.x, pSE.x);
+        let minPy = Math.min(pNW.y, pSE.y);
+        let maxPy = Math.max(pNW.y, pSE.y);
 
         let maxTiles = 1 << exportZ;
         let minX = Math.floor(minPx / tileSize) - 1;
@@ -1850,18 +2121,16 @@ async function exportMapPoster() {
 
         let totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
 
-        // If exportZ = baseZ + 2 yields too many tiles (> 280), fallback to baseZ + 1
-        if (exportZ > baseZ + 1 && totalTiles > 280) {
-            exportZ = baseZ + 1;
-            maxTiles = 1 << exportZ;
+        // Clamping if too many tiles (> 360)
+        while (totalTiles > 360 && exportZ > baseZ + 1) {
+            exportZ--;
             pNW = map.project(nwLatLng, exportZ);
             pSE = map.project(seLatLng, exportZ);
-            pNE = map.project(neLatLng, exportZ);
-            pSW = map.project(swLatLng, exportZ);
-            minPx = Math.min(pNW.x, pSE.x, pNE.x, pSW.x);
-            maxPx = Math.max(pNW.x, pSE.x, pNE.x, pSW.x);
-            minPy = Math.min(pNW.y, pSE.y, pNE.y, pSW.y);
-            maxPy = Math.max(pNW.y, pSE.y, pNE.y, pSW.y);
+            minPx = Math.min(pNW.x, pSE.x);
+            maxPx = Math.max(pNW.x, pSE.x);
+            minPy = Math.min(pNW.y, pSE.y);
+            maxPy = Math.max(pNW.y, pSE.y);
+            maxTiles = 1 << exportZ;
             minX = Math.floor(minPx / tileSize) - 1;
             maxX = Math.ceil(maxPx / tileSize) + 1;
             minY = Math.max(0, Math.floor(minPy / tileSize) - 1);
@@ -1869,8 +2138,10 @@ async function exportMapPoster() {
             totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
         }
 
-        // Scale ratio between projected exportZ pixels and poster canvas pixels
-        const scaleRatio = resMultiplier / Math.pow(2, exportZ - baseZ);
+        const projW = pSE.x - pNW.x;
+        const projH = pSE.y - pNW.y;
+        const scaleX = exportW / projW;
+        const scaleY = exportH / projH;
 
         const tileCoordsList = [];
         for (let y = minY; y <= maxY; y++) {
@@ -1878,10 +2149,10 @@ async function exportMapPoster() {
                 const tileX_proj = x * tileSize;
                 const tileY_proj = y * tileSize;
 
-                const drawX = Math.floor((tileX_proj - pNW.x) * scaleRatio);
-                const drawY = Math.floor((tileY_proj - pNW.y) * scaleRatio);
-                const drawW = Math.ceil(tileSize * scaleRatio) + 1;
-                const drawH = Math.ceil(tileSize * scaleRatio) + 1;
+                const drawX = Math.floor((tileX_proj - pNW.x) * scaleX);
+                const drawY = Math.floor((tileY_proj - pNW.y) * scaleY);
+                const drawW = Math.ceil(tileSize * scaleX) + 1;
+                const drawH = Math.ceil(tileSize * scaleY) + 1;
 
                 const wrappedX = ((x % maxTiles) + maxTiles) % maxTiles;
 
@@ -1898,11 +2169,11 @@ async function exportMapPoster() {
             }
         }
 
-        // 3. Render Basemap Tiles (High / Ultra resolution)
+        // 3. Render Basemap Tiles
         let loadedTiles = 0;
         const updateProgress = () => {
             loadedTiles++;
-            exportBtn.innerHTML = `Rendering Map (${loadedTiles}/${tileCoordsList.length})...`;
+            exportBtn.innerHTML = `Rendering Basemap (${loadedTiles}/${tileCoordsList.length})...`;
         };
 
         if (state.activeBasemap === 'western-dem') {
@@ -1913,18 +2184,11 @@ async function exportMapPoster() {
                     tCanvas.width = 256;
                     tCanvas.height = 256;
                     tCanvas.getContext('2d').putImageData(tileImgData, 0, 0);
-                    ctx.drawImage(
-                        tCanvas,
-                        t.drawX,
-                        t.drawY,
-                        t.drawW,
-                        t.drawH
-                    );
+                    ctx.drawImage(tCanvas, t.drawX, t.drawY, t.drawW, t.drawH);
                 }
                 updateProgress();
             }));
         } else {
-            // Tile-based basemap (USGS 3DEP, Satellite, OpenTopo, Dark Canvas)
             const layerObj = BASEMAP_LAYERS[state.activeBasemap];
             if (layerObj && layerObj.layer) {
                 await Promise.all(tileCoordsList.map(async (t) => {
@@ -1933,13 +2197,7 @@ async function exportMapPoster() {
                         if (url) {
                             const img = await loadImageAsync(url);
                             if (img) {
-                                ctx.drawImage(
-                                    img,
-                                    t.drawX,
-                                    t.drawY,
-                                    t.drawW,
-                                    t.drawH
-                                );
+                                ctx.drawImage(img, t.drawX, t.drawY, t.drawW, t.drawH);
                             }
                         }
                     } catch (e) {
@@ -1950,71 +2208,55 @@ async function exportMapPoster() {
             }
         }
 
-        // 4. Render Roads & Place Names Reference Overlays (High / Ultra resolution)
+        // 4. Render Roads & Place Names Reference Overlays
         if (state.showLabels && state.labelsOpacity > 0) {
             ctx.save();
             ctx.globalAlpha = state.labelsOpacity;
 
-            // Step 4a: Render Roads & Highways (Esri World Transportation)
+            // Roads
             if (roadsLayer) {
+                exportBtn.innerHTML = 'Rendering Roads...';
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
                         const url = getLayerTileUrl(roadsLayer, t.tileX, t.y, t.z);
                         if (url) {
                             const img = await loadImageAsync(url);
-                            if (img) {
-                                ctx.drawImage(
-                                    img,
-                                    t.drawX,
-                                    t.drawY,
-                                    t.drawW,
-                                    t.drawH
-                                );
-                            }
+                            if (img) ctx.drawImage(img, t.drawX, t.drawY, t.drawW, t.drawH);
                         }
-                    } catch (e) {
-                        // Ignore missing road tiles
-                    }
+                    } catch (e) {}
                 }));
             }
 
-            // Step 4b: Render Place Names & Boundaries (Esri World Boundaries and Places) on top of roads
+            // Place Names
             if (labelsLayer) {
+                exportBtn.innerHTML = 'Rendering Place Names...';
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
                         const url = getLayerTileUrl(labelsLayer, t.tileX, t.y, t.z);
                         if (url) {
                             const img = await loadImageAsync(url);
-                            if (img) {
-                                ctx.drawImage(
-                                    img,
-                                    t.drawX,
-                                    t.drawY,
-                                    t.drawW,
-                                    t.drawH
-                                );
-                            }
+                            if (img) ctx.drawImage(img, t.drawX, t.drawY, t.drawW, t.drawH);
                         }
-                    } catch (e) {
-                        // Ignore missing label tiles
-                    }
+                    } catch (e) {}
                 }));
             }
             ctx.restore();
         }
 
-        // 5. Draw Flight Tracks (Direct floating-point subpixel vector projection at export resolution)
-        exportBtn.innerHTML = 'Rendering Tracks...';
+        // 5. Draw Flight Tracks with Subpixel Precision
+        exportBtn.innerHTML = 'Rendering Flight Tracks...';
+        // Proportional scale factor for track line width based on physical DPI
+        const dpiScale = config.dpi / 96; // 300 DPI = ~3.125x, 150 DPI = ~1.56x
         const visibleTracks = state.activeTracks.filter(t => t.visible);
+
         visibleTracks.forEach(track => {
             const pts = track.points;
             if (pts.length < 2) return;
 
-            // Project all coordinates with floating-point precision directly to poster canvas space
             const screenCoords = pts.map(p => {
                 const ptProj = map.project([p.lat, p.lon], exportZ);
-                const exX = (ptProj.x - pNW.x) * scaleRatio;
-                const exY = (ptProj.y - pNW.y) * scaleRatio;
+                const exX = (ptProj.x - pNW.x) * scaleX;
+                const exY = (ptProj.y - pNW.y) * scaleY;
                 return [exX, exY, p.alt, p.time];
             });
 
@@ -2027,14 +2269,14 @@ async function exportMapPoster() {
                     ctx.lineTo(screenCoords[i][0], screenCoords[i][1]);
                 }
                 ctx.strokeStyle = state.trackColor;
-                ctx.lineWidth = (state.lineWidth + state.glowRadius * 1.8) * resMultiplier;
+                ctx.lineWidth = (state.lineWidth + state.glowRadius * 1.8) * dpiScale;
                 ctx.globalAlpha = state.opacity * 0.35;
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
                 ctx.stroke();
                 ctx.restore();
 
-                // Core sharp track
+                // Core track
                 ctx.save();
                 ctx.beginPath();
                 ctx.moveTo(screenCoords[0][0], screenCoords[0][1]);
@@ -2042,7 +2284,7 @@ async function exportMapPoster() {
                     ctx.lineTo(screenCoords[i][0], screenCoords[i][1]);
                 }
                 ctx.strokeStyle = state.trackColor;
-                ctx.lineWidth = state.lineWidth * resMultiplier;
+                ctx.lineWidth = state.lineWidth * dpiScale;
                 ctx.globalAlpha = state.opacity;
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
@@ -2057,7 +2299,7 @@ async function exportMapPoster() {
                     ctx.lineTo(screenCoords[i][0], screenCoords[i][1]);
                 }
                 ctx.strokeStyle = track.color;
-                ctx.lineWidth = (state.lineWidth + 0.5) * resMultiplier;
+                ctx.lineWidth = (state.lineWidth + 0.5) * dpiScale;
                 ctx.globalAlpha = state.opacity;
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
@@ -2066,12 +2308,11 @@ async function exportMapPoster() {
 
             } else if (state.currentStyle === 'altitude' || state.currentStyle === 'vario') {
                 ctx.save();
-                ctx.lineWidth = (state.lineWidth + 0.5) * resMultiplier;
+                ctx.lineWidth = (state.lineWidth + 0.5) * dpiScale;
                 ctx.globalAlpha = state.opacity;
                 ctx.lineCap = 'round';
                 ctx.lineJoin = 'round';
 
-                // Render every single segment (SEG_STEP = 1) for maximum vector fidelity on ultra-high-res output
                 for (let i = 0; i < screenCoords.length - 1; i++) {
                     let segColor;
                     if (state.currentStyle === 'altitude') {
@@ -2092,21 +2333,24 @@ async function exportMapPoster() {
             }
         });
 
-        // 6. Draw Elegant Title Card Overlay (Top Right)
-        const pad = 24 * resMultiplier;
-        const boxW = 340 * resMultiplier;
-        const boxH = 76 * resMultiplier;
+        // 6. Draw Elegant Poster Title Card (Scaled to Physical Inches)
+        const dpi = config.dpi;
+        const pad = Math.round(0.4 * dpi); // 0.4 inches from corner
+        const boxW = Math.min(Math.round(4.8 * dpi), Math.round(exportW * 0.45));
+        const boxH = Math.round(1.15 * dpi);
         const boxX = exportW - boxW - pad;
         const boxY = pad;
+        const cornerR = Math.round(0.12 * dpi);
+        const borderW = Math.max(1.5, Math.round(0.015 * dpi));
 
         ctx.save();
-        ctx.fillStyle = 'rgba(11, 15, 25, 0.88)';
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-        ctx.lineWidth = 1.5 * resMultiplier;
+        ctx.fillStyle = 'rgba(11, 15, 25, 0.90)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+        ctx.lineWidth = borderW;
 
         ctx.beginPath();
         if (ctx.roundRect) {
-            ctx.roundRect(boxX, boxY, boxW, boxH, 10 * resMultiplier);
+            ctx.roundRect(boxX, boxY, boxW, boxH, cornerR);
         } else {
             ctx.rect(boxX, boxY, boxW, boxH);
         }
@@ -2114,39 +2358,51 @@ async function exportMapPoster() {
         ctx.stroke();
 
         // Title text
+        const titleFontSize = Math.round(0.24 * dpi); // ~17pt
         ctx.fillStyle = '#FFFFFF';
-        ctx.font = `bold ${16 * resMultiplier}px Inter, -apple-system, sans-serif`;
-        ctx.fillText(title, boxX + 18 * resMultiplier, boxY + 30 * resMultiplier);
+        ctx.font = `bold ${titleFontSize}px Inter, -apple-system, sans-serif`;
+        ctx.fillText(title, boxX + Math.round(0.25 * dpi), boxY + Math.round(0.46 * dpi));
 
         // Subtitle text
         const totalDist = Math.round(state.activeTracks.reduce((acc, t) => acc + t.distanceKm, 0));
+        const subFontSize = Math.round(0.135 * dpi); // ~10pt
         ctx.fillStyle = '#94A3B8';
-        ctx.font = `500 ${11 * resMultiplier}px Inter, -apple-system, sans-serif`;
+        ctx.font = `500 ${subFontSize}px Inter, -apple-system, sans-serif`;
         ctx.fillText(
             `${state.activeTracks.length} Flights • ${totalDist.toLocaleString()} km Total Distance`,
-            boxX + 18 * resMultiplier,
-            boxY + 54 * resMultiplier
+            boxX + Math.round(0.25 * dpi),
+            boxY + Math.round(0.82 * dpi)
         );
         ctx.restore();
 
-        // 7. Trigger PNG Download
-        poster.toBlob((blob) => {
+        // 7. Generate PNG Blob, Embed pHYs Metadata (300 DPI), and Trigger Download
+        exportBtn.innerHTML = 'Encoding PNG & Embedding Print Metadata...';
+        poster.toBlob(async (blob) => {
             if (!blob) {
-                alert('Export failed to generate PNG blob.');
+                alert('Export failed to generate PNG image.');
+                exportBtn.disabled = false;
+                exportBtn.innerHTML = origHTML;
                 return;
             }
-            const url = URL.createObjectURL(blob);
+
+            // Inject PNG pHYs chunk with physical DPI
+            const finalBlob = await embedPngDpi(blob, config.dpi);
+
+            const url = URL.createObjectURL(finalBlob);
             const link = document.createElement('a');
-            link.download = `${title.toLowerCase().replace(/\s+/g, '_')}_poster.png`;
+            const safeTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            link.download = `${safeTitle}_${config.preset.short || config.sizeKey}_${config.orient}_${config.dpi}dpi.png`;
             link.href = url;
             link.click();
-            setTimeout(() => URL.revokeObjectURL(url), 15000);
+            setTimeout(() => URL.revokeObjectURL(url), 20000);
+
+            exportBtn.disabled = false;
+            exportBtn.innerHTML = origHTML;
         }, 'image/png');
 
     } catch (err) {
         console.error('Poster export error:', err);
         alert('Could not export poster: ' + err.message);
-    } finally {
         exportBtn.disabled = false;
         exportBtn.innerHTML = origHTML;
     }
