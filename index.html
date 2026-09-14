@@ -261,20 +261,20 @@
                         10,800 × 7,200 px • 36.0" × 24.0" @ 300 DPI
                     </div>
 
-                    <div class="export-checkbox-row">
-                        <label class="custom-checkbox">
-                            <input type="checkbox" id="toggle-crop-frame" checked>
-                            <span class="checkbox-indicator"></span>
-                            <span class="checkbox-text">Show Poster Frame on Map</span>
-                        </label>
+                    <div class="export-actions-row">
+                        <button type="button" class="btn-secondary" id="btn-adjust-frame" style="flex: 1; justify-content: center;">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5h-4m4 0v-4m0 4l-5-5"/>
+                            </svg>
+                            Frame Poster
+                        </button>
+                        <button type="button" class="btn-primary" id="btn-export-poster" style="flex: 1.2; justify-content: center;">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                            </svg>
+                            Export PNG
+                        </button>
                     </div>
-
-                    <button type="button" class="btn-primary" id="btn-export-poster" style="width: 100%; justify-content: center;">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-                        </svg>
-                        Export Poster PNG
-                    </button>
                 </div>
             </section>
 
@@ -298,13 +298,34 @@
         <main class="map-viewport">
             <div id="map"></div>
 
-            <!-- Interactive Poster Crop Frame Overlay -->
-            <div id="poster-frame-overlay" class="poster-frame-overlay">
+            <!-- Floating Framing Bar (visible during framing & export) -->
+            <div id="export-framing-bar" class="export-framing-bar hidden">
+                <div class="framing-bar-info">
+                    <span class="framing-badge" id="framing-bar-badge">24" × 36" Landscape</span>
+                    <span class="framing-hint">Drag corners to resize • Pan map or scroll to zoom</span>
+                </div>
+                <div class="framing-bar-actions">
+                    <button type="button" class="btn-framing-cancel" id="btn-cancel-framing">Cancel</button>
+                    <button type="button" class="btn-framing-download" id="btn-confirm-export">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                        </svg>
+                        Download Poster
+                    </button>
+                </div>
+            </div>
+
+            <!-- Interactive Poster Crop Frame Overlay (only visible during export / framing) -->
+            <div id="poster-frame-overlay" class="poster-frame-overlay hidden">
                 <div id="poster-frame-box" class="poster-frame-box">
                     <div class="poster-crop-mark tl"></div>
                     <div class="poster-crop-mark tr"></div>
                     <div class="poster-crop-mark bl"></div>
                     <div class="poster-crop-mark br"></div>
+                    <div class="crop-handle tl" data-corner="tl" title="Drag to resize poster frame"></div>
+                    <div class="crop-handle tr" data-corner="tr" title="Drag to resize poster frame"></div>
+                    <div class="crop-handle bl" data-corner="bl" title="Drag to resize poster frame"></div>
+                    <div class="crop-handle br" data-corner="br" title="Drag to resize poster frame"></div>
                     <span class="poster-frame-badge" id="poster-frame-badge">36" × 24" Landscape</span>
                 </div>
             </div>
@@ -332,6 +353,6 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
     <!-- App Logic -->
-    <script src="app.js?v=1.4.0"></script>
+    <script src="app.js?v=1.5.0"></script>
 </body>
 </html>

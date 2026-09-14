@@ -23,7 +23,8 @@ const state = {
     exportSize: '24x36',    // '24x36' | '18x24' | '20x30' | '12x18' | 'a1' | 'a2' | 'viewport'
     exportOrientation: 'landscape', // 'landscape' | 'portrait'
     exportDpi: 300,         // 300 (fine print) | 150 (draft/large format)
-    showCropFrame: true,    // Show visual poster frame overlay on map
+    showCropFrame: false,   // Only show visual poster frame overlay during export / framing
+    cropFrameScale: 0.88,   // Fraction of viewport width/height covered by frame (resizable via corner handles)
 };
 
 // Standard Physical Poster Print Sizes
@@ -266,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initDropzone();
     updateStatsSummary();
     updateExportMetaInfo();
-    updatePosterFrame();
+    initCropFrameHandles();
 });
 
 function initMap() {
@@ -274,7 +275,10 @@ function initMap() {
         center: REGION_PRESETS.california.center,
         zoom: REGION_PRESETS.california.zoom,
         zoomControl: false,
-        preferCanvas: true
+        preferCanvas: true,
+        zoomSnap: 0.1,             // Fine fractional zoom step (0.1 increments instead of 1.0)
+        zoomDelta: 0.25,            // Smooth button zooming
+        wheelPxPerZoomLevel: 120    // Smooth trackpad and mouse wheel zooming
     });
 
     // Add Zoom Control at top-right
@@ -560,18 +564,38 @@ function initUIEventListeners() {
         });
     }
 
-    const cropToggle = document.getElementById('toggle-crop-frame');
-    if (cropToggle) {
-        cropToggle.addEventListener('change', (e) => {
-            state.showCropFrame = e.target.checked;
-            updatePosterFrame();
+    // Poster Framing & Export Mode Buttons
+    const frameBtn = document.getElementById('btn-adjust-frame');
+    if (frameBtn) {
+        frameBtn.addEventListener('click', () => {
+            if (state.showCropFrame) {
+                exitFramingMode();
+            } else {
+                enterFramingMode();
+            }
         });
     }
 
-    // Export Poster Button
+    const cancelFramingBtn = document.getElementById('btn-cancel-framing');
+    if (cancelFramingBtn) {
+        cancelFramingBtn.addEventListener('click', exitFramingMode);
+    }
+
+    const confirmExportBtn = document.getElementById('btn-confirm-export');
+    if (confirmExportBtn) {
+        confirmExportBtn.addEventListener('click', exportMapPoster);
+    }
+
+    // Export Poster Button from Sidebar
     const exportBtn = document.getElementById('btn-export-poster');
     if (exportBtn) {
-        exportBtn.addEventListener('click', exportMapPoster);
+        exportBtn.addEventListener('click', () => {
+            if (!state.showCropFrame) {
+                enterFramingMode();
+            } else {
+                exportMapPoster();
+            }
+        });
     }
 
     // Mobile Sidebar Toggle
@@ -1990,10 +2014,10 @@ function getPosterScreenFrame() {
     const config = getPosterConfig();
     const targetRatio = config.ratio; // W / H
 
-    // Fit frame inside 92% of visible screen viewport
-    const margin = 0.92;
-    const maxW = mapSize.x * margin;
-    const maxH = mapSize.y * margin;
+    // Fit frame inside cropFrameScale fraction of visible screen viewport (resizable by dragging corner handles)
+    const scale = state.cropFrameScale || 0.88;
+    const maxW = mapSize.x * scale;
+    const maxH = mapSize.y * scale;
 
     let frameW, frameH;
     if (maxW / maxH > targetRatio) {
@@ -2038,6 +2062,7 @@ function updatePosterFrame() {
     const overlay = document.getElementById('poster-frame-overlay');
     const box = document.getElementById('poster-frame-box');
     const badge = document.getElementById('poster-frame-badge');
+    const framingBadge = document.getElementById('framing-bar-badge');
     if (!overlay || !box || !map) return;
 
     if (!state.showCropFrame) {
@@ -2055,11 +2080,107 @@ function updatePosterFrame() {
     box.style.width = `${Math.round(w)}px`;
     box.style.height = `${Math.round(h)}px`;
 
+    const config = frameData.config;
+    const orientLabel = config.orient.charAt(0).toUpperCase() + config.orient.slice(1);
+
     if (badge) {
-        const config = frameData.config;
-        const orientLabel = config.orient.charAt(0).toUpperCase() + config.orient.slice(1);
         badge.textContent = `${config.wIn}" × ${config.hIn}" ${orientLabel} (${config.widthPx.toLocaleString()} × ${config.heightPx.toLocaleString()} px)`;
     }
+    if (framingBadge) {
+        framingBadge.textContent = `${config.wIn}" × ${config.hIn}" ${orientLabel}`;
+    }
+}
+
+function enterFramingMode() {
+    state.showCropFrame = true;
+    const overlay = document.getElementById('poster-frame-overlay');
+    const framingBar = document.getElementById('export-framing-bar');
+    if (overlay) overlay.classList.remove('hidden');
+    if (framingBar) framingBar.classList.remove('hidden');
+
+    const frameBtn = document.getElementById('btn-adjust-frame');
+    if (frameBtn) {
+        frameBtn.classList.add('active');
+        frameBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            Close Frame
+        `;
+    }
+
+    updatePosterFrame();
+}
+
+function exitFramingMode() {
+    state.showCropFrame = false;
+    const overlay = document.getElementById('poster-frame-overlay');
+    const framingBar = document.getElementById('export-framing-bar');
+    if (overlay) overlay.classList.add('hidden');
+    if (framingBar) framingBar.classList.add('hidden');
+
+    const frameBtn = document.getElementById('btn-adjust-frame');
+    if (frameBtn) {
+        frameBtn.classList.remove('active');
+        frameBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5h-4m4 0v-4m0 4l-5-5"/>
+            </svg>
+            Frame Poster
+        `;
+    }
+}
+
+function initCropFrameHandles() {
+    const box = document.getElementById('poster-frame-box');
+    if (!box) return;
+
+    box.querySelectorAll('.crop-handle').forEach(handle => {
+        handle.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handle.setPointerCapture(e.pointerId);
+
+            const onPointerMove = (ev) => {
+                if (!map) return;
+                const mapSize = map.getSize();
+                const config = getPosterConfig();
+                const targetRatio = config.ratio;
+
+                const cx = mapSize.x / 2;
+                const cy = mapSize.y / 2;
+
+                const dx = Math.abs(ev.clientX - cx);
+                const dy = Math.abs(ev.clientY - cy);
+
+                // Implied dimensions from cursor distance to center
+                const wx = dx * 2;
+                const wy = dy * 2 * targetRatio;
+                const wNew = (wx + wy) / 2;
+
+                // Max possible box width that fits within current screen
+                const maxPossibleW = Math.min(mapSize.x, mapSize.y * targetRatio);
+                if (maxPossibleW <= 0) return;
+
+                const newScale = wNew / maxPossibleW;
+                state.cropFrameScale = Math.min(0.96, Math.max(0.20, newScale));
+                updatePosterFrame();
+            };
+
+            const onPointerUp = (ev) => {
+                try {
+                    handle.releasePointerCapture(ev.pointerId);
+                } catch (_) {}
+                handle.removeEventListener('pointermove', onPointerMove);
+                handle.removeEventListener('pointerup', onPointerUp);
+                handle.removeEventListener('pointercancel', onPointerUp);
+            };
+
+            handle.addEventListener('pointermove', onPointerMove);
+            handle.addEventListener('pointerup', onPointerUp);
+            handle.addEventListener('pointercancel', onPointerUp);
+        });
+    });
 }
 
 async function exportMapPoster() {
@@ -2072,9 +2193,22 @@ async function exportMapPoster() {
     }
 
     const exportBtn = document.getElementById('btn-export-poster');
-    const origHTML = exportBtn.innerHTML;
-    exportBtn.disabled = true;
-    exportBtn.innerHTML = 'Rendering Poster...';
+    const confirmBtn = document.getElementById('btn-confirm-export');
+    const origExportHTML = exportBtn ? exportBtn.innerHTML : '';
+    const origConfirmHTML = confirmBtn ? confirmBtn.innerHTML : '';
+
+    const setExportStatus = (msg) => {
+        if (exportBtn) {
+            exportBtn.disabled = true;
+            exportBtn.innerHTML = msg;
+        }
+        if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.innerHTML = msg;
+        }
+    };
+
+    setExportStatus('Rendering Poster...');
 
     try {
         const exportW = config.widthPx;
@@ -2099,7 +2233,7 @@ async function exportMapPoster() {
         // Target resolution ratio vs on-screen frame
         const scaleRatioTarget = exportW / frameData.screen.w;
         let idealZ = Math.round(baseZ + Math.log2(scaleRatioTarget));
-        let exportZ = Math.min(maxNativeZoom, Math.max(baseZ, idealZ));
+        let exportZ = Math.min(maxNativeZoom, Math.max(Math.floor(baseZ), idealZ));
 
         const tileSize = 256;
         const nwLatLng = frameData.geo.nwLatLng;
@@ -2122,7 +2256,7 @@ async function exportMapPoster() {
         let totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
 
         // Clamping if too many tiles (> 360)
-        while (totalTiles > 360 && exportZ > baseZ + 1) {
+        while (totalTiles > 360 && exportZ > Math.floor(baseZ) + 1) {
             exportZ--;
             pNW = map.project(nwLatLng, exportZ);
             pSE = map.project(seLatLng, exportZ);
@@ -2173,7 +2307,7 @@ async function exportMapPoster() {
         let loadedTiles = 0;
         const updateProgress = () => {
             loadedTiles++;
-            exportBtn.innerHTML = `Rendering Basemap (${loadedTiles}/${tileCoordsList.length})...`;
+            setExportStatus(`Rendering Basemap (${loadedTiles}/${tileCoordsList.length})...`);
         };
 
         if (state.activeBasemap === 'western-dem') {
@@ -2215,7 +2349,7 @@ async function exportMapPoster() {
 
             // Roads
             if (roadsLayer) {
-                exportBtn.innerHTML = 'Rendering Roads...';
+                setExportStatus('Rendering Roads...');
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
                         const url = getLayerTileUrl(roadsLayer, t.tileX, t.y, t.z);
@@ -2229,7 +2363,7 @@ async function exportMapPoster() {
 
             // Place Names
             if (labelsLayer) {
-                exportBtn.innerHTML = 'Rendering Place Names...';
+                setExportStatus('Rendering Place Names...');
                 await Promise.all(tileCoordsList.map(async (t) => {
                     try {
                         const url = getLayerTileUrl(labelsLayer, t.tileX, t.y, t.z);
@@ -2244,9 +2378,8 @@ async function exportMapPoster() {
         }
 
         // 5. Draw Flight Tracks with Subpixel Precision
-        exportBtn.innerHTML = 'Rendering Flight Tracks...';
-        // Proportional scale factor for track line width based on physical DPI
-        const dpiScale = config.dpi / 96; // 300 DPI = ~3.125x, 150 DPI = ~1.56x
+        setExportStatus('Rendering Flight Tracks...');
+        const dpiScale = config.dpi / 96;
         const visibleTracks = state.activeTracks.filter(t => t.visible);
 
         visibleTracks.forEach(track => {
@@ -2335,7 +2468,7 @@ async function exportMapPoster() {
 
         // 6. Draw Elegant Poster Title Card (Scaled to Physical Inches)
         const dpi = config.dpi;
-        const pad = Math.round(0.4 * dpi); // 0.4 inches from corner
+        const pad = Math.round(0.4 * dpi);
         const boxW = Math.min(Math.round(4.8 * dpi), Math.round(exportW * 0.45));
         const boxH = Math.round(1.15 * dpi);
         const boxX = exportW - boxW - pad;
@@ -2358,14 +2491,14 @@ async function exportMapPoster() {
         ctx.stroke();
 
         // Title text
-        const titleFontSize = Math.round(0.24 * dpi); // ~17pt
+        const titleFontSize = Math.round(0.24 * dpi);
         ctx.fillStyle = '#FFFFFF';
         ctx.font = `bold ${titleFontSize}px Inter, -apple-system, sans-serif`;
         ctx.fillText(title, boxX + Math.round(0.25 * dpi), boxY + Math.round(0.46 * dpi));
 
         // Subtitle text
         const totalDist = Math.round(state.activeTracks.reduce((acc, t) => acc + t.distanceKm, 0));
-        const subFontSize = Math.round(0.135 * dpi); // ~10pt
+        const subFontSize = Math.round(0.135 * dpi);
         ctx.fillStyle = '#94A3B8';
         ctx.font = `500 ${subFontSize}px Inter, -apple-system, sans-serif`;
         ctx.fillText(
@@ -2376,12 +2509,18 @@ async function exportMapPoster() {
         ctx.restore();
 
         // 7. Generate PNG Blob, Embed pHYs Metadata (300 DPI), and Trigger Download
-        exportBtn.innerHTML = 'Encoding PNG & Embedding Print Metadata...';
+        setExportStatus('Encoding PNG & Embedding Print Metadata...');
         poster.toBlob(async (blob) => {
             if (!blob) {
                 alert('Export failed to generate PNG image.');
-                exportBtn.disabled = false;
-                exportBtn.innerHTML = origHTML;
+                if (exportBtn) {
+                    exportBtn.disabled = false;
+                    exportBtn.innerHTML = origExportHTML;
+                }
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.innerHTML = origConfirmHTML;
+                }
                 return;
             }
 
@@ -2396,15 +2535,30 @@ async function exportMapPoster() {
             link.click();
             setTimeout(() => URL.revokeObjectURL(url), 20000);
 
-            exportBtn.disabled = false;
-            exportBtn.innerHTML = origHTML;
+            // Hide bounding box once download starts
+            exitFramingMode();
+
+            if (exportBtn) {
+                exportBtn.disabled = false;
+                exportBtn.innerHTML = origExportHTML;
+            }
+            if (confirmBtn) {
+                confirmBtn.disabled = false;
+                confirmBtn.innerHTML = origConfirmHTML;
+            }
         }, 'image/png');
 
     } catch (err) {
         console.error('Poster export error:', err);
         alert('Could not export poster: ' + err.message);
-        exportBtn.disabled = false;
-        exportBtn.innerHTML = origHTML;
+        if (exportBtn) {
+            exportBtn.disabled = false;
+            exportBtn.innerHTML = origExportHTML;
+        }
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.innerHTML = origConfirmHTML;
+        }
     }
 }
 
