@@ -289,19 +289,21 @@ function initMap() {
     map.getPane('labelsPane').style.zIndex = 350;
     map.getPane('labelsPane').style.pointerEvents = 'none';
 
-    // Roads & Highways Reference Layer (Esri World Transportation)
-    roadsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
-        attribution: 'Roads &copy; Esri',
+    // High-Resolution Retina Roads & Highways Layer (Carto Voyager @2x)
+    roadsLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}@2x.png', {
+        attribution: 'Roads &copy; OpenStreetMap &copy; CARTO',
+        subdomains: 'abcd',
         pane: 'labelsPane',
-        maxZoom: 18,
+        maxZoom: 20,
         opacity: state.labelsOpacity
     }).addTo(map);
 
-    // Place Names & Boundaries Reference Layer (Esri World Boundaries and Places)
-    labelsLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
-        attribution: 'Reference &copy; Esri',
+    // High-Resolution Retina Place Names & Boundaries Layer (Carto Voyager @2x)
+    labelsLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}@2x.png', {
+        attribution: 'Reference &copy; OpenStreetMap &copy; CARTO',
+        subdomains: 'abcd',
         pane: 'labelsPane',
-        maxZoom: 18,
+        maxZoom: 20,
         opacity: state.labelsOpacity
     }).addTo(map);
 
@@ -2133,7 +2135,8 @@ function exitFramingMode() {
 
 function initCropFrameHandles() {
     const box = document.getElementById('poster-frame-box');
-    if (!box) return;
+    const overlay = document.getElementById('poster-frame-overlay');
+    if (!box || !overlay) return;
 
     box.querySelectorAll('.crop-handle').forEach(handle => {
         handle.addEventListener('pointerdown', (e) => {
@@ -2141,29 +2144,53 @@ function initCropFrameHandles() {
             e.stopPropagation();
             handle.setPointerCapture(e.pointerId);
 
+            const corner = handle.dataset.corner; // 'tl', 'tr', 'bl', 'br'
+
             const onPointerMove = (ev) => {
                 if (!map) return;
-                const mapSize = map.getSize();
+                const rect = overlay.getBoundingClientRect();
                 const config = getPosterConfig();
-                const targetRatio = config.ratio;
+                const targetRatio = config.ratio; // W / H
 
-                const cx = mapSize.x / 2;
-                const cy = mapSize.y / 2;
+                // Cursor position in container coordinates
+                const mouseX = ev.clientX - rect.left;
+                const mouseY = ev.clientY - rect.top;
 
-                const dx = Math.abs(ev.clientX - cx);
-                const dy = Math.abs(ev.clientY - cy);
+                // Center of container
+                const cx = rect.width / 2;
+                const cy = rect.height / 2;
 
-                // Implied dimensions from cursor distance to center
-                const wx = dx * 2;
-                const wy = dy * 2 * targetRatio;
-                const wNew = (wx + wy) / 2;
+                // Distance from center along X and Y according to which corner is dragged
+                let dx = 0;
+                let dy = 0;
 
-                // Max possible box width that fits within current screen
-                const maxPossibleW = Math.min(mapSize.x, mapSize.y * targetRatio);
-                if (maxPossibleW <= 0) return;
+                if (corner === 'br') {
+                    dx = mouseX - cx;
+                    dy = mouseY - cy;
+                } else if (corner === 'tl') {
+                    dx = cx - mouseX;
+                    dy = cy - mouseY;
+                } else if (corner === 'tr') {
+                    dx = mouseX - cx;
+                    dy = cy - mouseY;
+                } else if (corner === 'bl') {
+                    dx = cx - mouseX;
+                    dy = mouseY - cy;
+                }
 
-                const newScale = wNew / maxPossibleW;
-                state.cropFrameScale = Math.min(0.96, Math.max(0.20, newScale));
+                if (dx <= 10 && dy <= 10) return;
+
+                // Project (dx, dy) onto the aspect-ratio diagonal line so corner tracks mouse cursor exactly
+                // Aspect ratio: wHalf / hHalf = targetRatio => wHalf = targetRatio * hHalf
+                const A = targetRatio;
+                const wHalf = Math.max(30, (A * (dx * A + dy)) / (A * A + 1));
+
+                // Max possible half-width that fits in container
+                const maxHalfW = 0.5 * Math.min(rect.width, rect.height * targetRatio);
+                if (maxHalfW <= 0) return;
+
+                const newScale = wHalf / maxHalfW;
+                state.cropFrameScale = Math.min(0.96, Math.max(0.15, newScale));
                 updatePosterFrame();
             };
 
@@ -2228,17 +2255,19 @@ async function exportMapPoster() {
 
         // 2. Determine optimal export tile zoom level
         const baseZ = map.getZoom();
-        const maxNativeZoom = BASEMAP_LAYERS[state.activeBasemap]?.layer?.options?.maxZoom || 15;
+        const maxNativeZoom = BASEMAP_LAYERS[state.activeBasemap]?.layer?.options?.maxZoom || 16;
         
-        // Target resolution ratio vs on-screen frame
-        const scaleRatioTarget = exportW / frameData.screen.w;
-        let idealZ = Math.round(baseZ + Math.log2(scaleRatioTarget));
+        const nwLatLng = frameData.geo.nwLatLng;
+        const seLatLng = frameData.geo.seLatLng;
+        const deltaLng = Math.max(0.001, Math.abs(seLatLng.lng - nwLatLng.lng));
+
+        // Target zoom where tile resolution naturally matches export pixel width
+        // World width at zoom Z is 256 * 2^Z. Span deltaLng is 256 * 2^Z * (deltaLng / 360).
+        // Setting span = exportW gives 2^Z = (exportW * 360) / (256 * deltaLng).
+        const idealZ = Math.round(Math.log2((exportW * 360) / (256 * deltaLng)));
         let exportZ = Math.min(maxNativeZoom, Math.max(Math.floor(baseZ), idealZ));
 
         const tileSize = 256;
-        const nwLatLng = frameData.geo.nwLatLng;
-        const seLatLng = frameData.geo.seLatLng;
-
         let pNW = map.project(nwLatLng, exportZ);
         let pSE = map.project(seLatLng, exportZ);
 
@@ -2255,8 +2284,8 @@ async function exportMapPoster() {
 
         let totalTiles = (maxX - minX + 1) * (maxY - minY + 1);
 
-        // Clamping if too many tiles (> 360)
-        while (totalTiles > 360 && exportZ > Math.floor(baseZ) + 1) {
+        // Clamp if tile count exceeds 550 to preserve memory and fast export
+        while (totalTiles > 550 && exportZ > Math.floor(baseZ)) {
             exportZ--;
             pNW = map.project(nwLatLng, exportZ);
             pSE = map.project(seLatLng, exportZ);
